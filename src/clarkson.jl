@@ -1,6 +1,7 @@
 module CLARKSON
   using DataStructures
   using JuMP, Gurobi
+  using Random, WeightVectors
 
   struct BucketSystem{T}
       buckets::Vector{Set{T}}
@@ -48,21 +49,24 @@ module CLARKSON
       
       constraints::Vector{ConstraintRef}
       numConstraints::Int64
-      weights::Vector{Int64}
-      buckets::BucketSystem{Int64}
+      weights::WeightVectors.AbstractWeightVector
+      #buckets::BucketSystem{Int64}
       totalWeight::Int64
+      rng::AbstractRNG
   end
 
   function ModelConstraints(model::Model)
-      BS = BucketSystem{Int64}(64)
+      #BS = BucketSystem{Int64}(64)
       constraints = all_constraints(model; include_variable_in_set_constraints = true)
       i = 1
-      for _ in constraints
-          add_to_bucket!(BS, 1, i)
-          i += 1
-      end
+      #for _ in constraints
+      #    add_to_bucket!(BS, 1, i)
+      #    i += 1
+      #end
       m = length(constraints)
-      return ModelConstraints(constraints, length(constraints), zeros(Int, m), BS, m)
+
+      return ModelConstraints(constraints, length(constraints), FixedSizeWeightVector(ones(Float64, m)), m, Xoshiro(42))
+      #return ModelConstraints(constraints, length(constraints), zeros(Int, m), BS, m)
 
       # Collect affine constraints
       #aff_le = all_constraints(model, AffExpr, MOI.LessThan{Float64})
@@ -115,9 +119,10 @@ module CLARKSON
   end
 
   function updateWeight(Constraints::ModelConstraints, i::Int)
-    Constraints.totalWeight += 2^Constraints.weights[i]
-    promote!(Constraints.buckets, Constraints.weights[i]+1, Constraints.weights[i]+2, [i])
-    Constraints.weights[i] += 1
+    Constraints.totalWeight += Constraints.weights[i]
+    #promote!(Constraints.buckets, Constraints.weights[i]+1, Constraints.weights[i]+2, [i])
+    #Constraints.weights[i] += 1
+    constraints.weights[i] *= 2
   end
 
   # addConstraints(model, constraints, variableMap, R)
@@ -273,11 +278,12 @@ module CLARKSON
   end
 
   function sample(model::ModelConstraints, r::Int)
-    samples = Vector{Int}();
-    for i in 1:r
-      push!(samples, sample(model))
-    end
-    return samples
+    #samples = Vector{Int}();
+    #for i in 1:r
+    #  push!(samples, sample(model))
+    #end
+    #return samples
+    rand(model.rng, model.weights, r)
   end
 
   # clarkson(model)
@@ -318,6 +324,7 @@ module CLARKSON
       addConstraints(newModel, constraints, variableMap, R)
       set_optimizer(newModel, Gurobi.Optimizer)
       # Solve base case.
+      set_silent(newModel)
       optimize!(newModel)
       status = termination_status(newModel)
       optimalPrimal = nothing
