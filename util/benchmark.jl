@@ -18,8 +18,7 @@ function parse_commandline()
         #    default = "output.mps"
         "--gurobi", "-g"
             help = "Use native gurobi."
-            arg_type = Bool
-            default = false
+            action = :store_true
     end
 
     return parse_args(s)
@@ -52,6 +51,7 @@ function main()
 
   input_file = parsed_args["input_file"]
   use_gurobi = parsed_args["gurobi"]
+  println("use_gurobi:", use_gurobi)
 
   if (use_gurobi)
     benchmark_gurobi(input_file)
