@@ -1,4 +1,5 @@
 using JuMP, Gurobi
+using Profile
 
 include("../src/clarkson.jl")
 using .CLARKSON
@@ -81,7 +82,7 @@ end
 function test_clarkson(filename::String)
   tol = 1e-6
   model = read_from_file(filename)
-  obj, sol = clarkson(model)
+  obj, sol = @time clarkson(model)
 
   set_optimizer(model, Gurobi.Optimizer)
   set_silent(model)
@@ -100,4 +101,10 @@ function test_clarkson(filename::String)
   return true
 end
 
-@assert test_clarkson("input.mps")
+#@assert test_clarkson("input.mps")
+#@assert test_clarkson("bench/netlarge1.mps")
+#@assert test_clarkson("bench/16_n14.mps")
+#@assert test_clarkson("bench/a2864.mps")
+#@assert test_clarkson("bench/qap15.mps")
+#@assert test_clarkson("bench/fit1d.mps")
+@assert test_clarkson("bench/fit1d-dual.mps")

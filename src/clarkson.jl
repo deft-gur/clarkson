@@ -3,6 +3,8 @@ module CLARKSON
   using JuMP, Gurobi
   using Random, WeightVectors
 
+  EPS = 1e-6
+
   struct BucketSystem{T}
       buckets::Vector{Set{T}}
   end
@@ -37,72 +39,68 @@ module CLARKSON
   end
 
   mutable struct ModelConstraints
-      #affConstraints::Vector{ConstraintRef{Model, MOI.ConstraintIndex{MOI.ScalarAffineFunction{Float64}, <:Union{MOI.LessThan{Float64}, MOI.GreaterThan{Float64}, MOI.EqualTo{Float64}}}}}
-      #affConstraints::Vector{ConstraintRef{Model, MOI.ConstraintIndex{MOI.ScalarAffineFunction{Float64}, Any}}}
-      #affConstraints::Vector{Any}
-      #numAffConstraints::Int64
-      #varBounds::Dict{VariableRef, Tuple{Float64, Float64}}
-      #numVarBounds::Int64
-      #weights::Vector{Int64}
-      #buckets::BucketSystem{Int64}
-      #totalWeight::Int64
-      
       constraints::Vector{ConstraintRef}
       numConstraints::Int64
       weights::WeightVectors.AbstractWeightVector
-      #buckets::BucketSystem{Int64}
-      totalWeight::Int64
+      totalWeight::Float64
       rng::AbstractRNG
+      data::LPMatrixData{Float64}
+      numAffConstraints::Int64
+      numAffEqualTo::Int64
+      numAffLessThan::Int64
+      numAffGreaterThan::Int64
+      numVarConstraints::Int64
+      numVarEqualTo::Int64
+      numVarLessThan::Int64
+      numVarGreaterThan::Int64
   end
 
   function ModelConstraints(model::Model)
-      #BS = BucketSystem{Int64}(64)
-      constraints = all_constraints(model; include_variable_in_set_constraints = true)
+      # NOTE: We assume that all_constraints will return constraints
+      # with the following priority:
+      #   1. Affine constraint =, >=, <=
+      #   2. Variable constraint =, >=, <=
+      #constraints = all_constraints(model; include_variable_in_set_constraints = true)
+      constraints = all_constraints(model; include_variable_in_set_constraints = false)
       i = 1
-      #for _ in constraints
-      #    add_to_bucket!(BS, 1, i)
-      #    i += 1
-      #end
       m = length(constraints)
+      data = lp_matrix_data(model)
+      numAffEqualTo = length(all_constraints(model, AffExpr, MOI.EqualTo{Float64}))
+      numAffLessThan = length(all_constraints(model, AffExpr, MOI.LessThan{Float64}))
+      numAffGreaterThan = length(all_constraints(model, AffExpr, MOI.GreaterThan{Float64}))
 
-      return ModelConstraints(constraints, length(constraints), FixedSizeWeightVector(ones(Float64, m)), m, Xoshiro(42))
-      #return ModelConstraints(constraints, length(constraints), zeros(Int, m), BS, m)
+      numVarEqualTo = length(all_constraints(model, VariableRef, MOI.EqualTo{Float64}))
 
-      # Collect affine constraints
-      #aff_le = all_constraints(model, AffExpr, MOI.LessThan{Float64})
-      #aff_ge = all_constraints(model, AffExpr, MOI.GreaterThan{Float64})
-      #aff_eq = all_constraints(model, AffExpr, MOI.EqualTo{Float64})
-      #aff_constraints = [aff_le; aff_ge; aff_eq]
+      numVarLessThan = length(all_constraints(model, VariableRef, MOI.LessThan{Float64}))
 
-      #BS = BucketSystem{Int64}(64)
+      numVarGreaterThan = length(all_constraints(model, VariableRef, MOI.GreaterThan{Float64}))
 
-      ## Collect variable bounds
-      #vars = all_variables(model)
-      #bounds = Dict{VariableRef, Tuple{Float64, Float64}}()
-      #i = 1
-      #for v in vars
-      #    lb = has_lower_bound(v) ? lower_bound(v) : -Inf
-      #    ub = has_upper_bound(v) ? upper_bound(v) : Inf
-      #    bounds[v] = (lb, ub)
-      #    add_to_bucket!(BS, 1, i)
-      #    i +=1
-      #end
+      numVarConstraints = numVarEqualTo + numVarLessThan + numVarGreaterThan
+      numAffConstraints = numAffEqualTo + numAffLessThan + numAffGreaterThan
 
-      #for c in aff_constraints
-      #    add_to_bucket!(BS, 1, i)
-      #    i += 1
-      #end
-
-      #m = length(vars) + length(aff_constraints)
-      #return ModelConstraints(aff_constraints, length(aff_constraints), bounds,
-      #                        length(bounds), zeros(Int, m), BS, m)
+      return ModelConstraints(
+        constraints,
+        length(constraints),
+        FixedSizeWeightVector(ones(Float64, m)),
+        m,
+        Xoshiro(42),
+        data, 
+        numAffConstraints,
+        numAffEqualTo,
+        numAffLessThan,
+        numAffGreaterThan,
+        numVarConstraints,
+        numVarEqualTo,
+        numVarLessThan,
+        numVarGreaterThan
+        )
   end
 
   #
   # getConstraint(Constraints, i)
   #
   # Input:
-  #   Constraints, affine and variable constraints.
+  #   Constraints, ModelConstraints.
   #   i, index.
   #
   # Pre: 1 <= i <= Constraints.numVarBounds + Constraints.numAffConstraints
@@ -111,18 +109,13 @@ module CLARKSON
   #
   function getConstraint(Constraints::ModelConstraints, i::Int)
     return Constraints.constraints[i]
-    #if i <= Constraints.numVarBounds
-    #  return Constraints.varBounds[i]
-    #else
-    #  return Constraints.affConstraints[i-Constraints.numVarBounds]
-    #end
   end
 
-  function updateWeight(Constraints::ModelConstraints, i::Int)
+  function updateWeight(Constraints::ModelConstraints, i::Int, mul::Float64 = 2.0)
     Constraints.totalWeight += Constraints.weights[i]
     #promote!(Constraints.buckets, Constraints.weights[i]+1, Constraints.weights[i]+2, [i])
     #Constraints.weights[i] += 1
-    constraints.weights[i] *= 2
+    Constraints.weights[i] *= mul 
   end
 
   # addConstraints(model, constraints, variableMap, R)
@@ -176,13 +169,12 @@ module CLARKSON
     # Map VariableRef from Model to VariableRef to baseModel
     varMap = Dict{VariableRef, VariableRef}()
     for v in vars
-      #lb = has_lower_bound(v) ? lower_bound(v) : -Inf
-      #ub = has_upper_bound(v) ? upper_bound(v) : Inf
-      lb = -Inf
-      ub = Inf
+      lb = has_lower_bound(v) ? lower_bound(v) : -Inf
+      ub = has_upper_bound(v) ? upper_bound(v) : Inf
+      #lb = -Inf
+      #ub = Inf
       varMap[v] = @variable(baseModel, base_name = name(v), lower_bound=lb, upper_bound=ub)
     end
-
 
     obj_sense = objective_sense(model)
     obj_func = objective_function(model)
@@ -205,20 +197,84 @@ module CLARKSON
     return baseModel, varMap
   end
 
+  function getLHSData(constraints, LHSData, point, i)
+    constr_obj = constraint_object(constraints.constraints[i])
+    func = constr_obj.func
+
+    if (func isa VariableRef)
+      return point[func.index.value]
+      if (constr_obj.set isa MOI.EqualTo{Float64})
+        return point[i - constraints.numAffConstraints]
+      elseif (constr_obj.set isa MOI.GreaterThan{Float64})
+        return point[i - constraints.numAffConstraints - constraints.numVarEqualTo]
+      else
+        return point[i - constraints.numAffConstraints - constraints.numVarEqualTo - constraints.numVarGreaterThan]
+      end
+    elseif (func isa AffExpr)
+      return LHSData[i]
+    else
+      throw(ErrorException("Cannot determine if it is AffExpr or VariableRef."))
+    end
+  end
+
+  function getRHSData(constraints, i)
+    constr_obj = constraint_object(constraints.constraints[i])
+      if (constr_obj.set isa MOI.EqualTo{Float64})
+        return constr_obj.set.value
+      elseif (constr_obj.set isa MOI.GreaterThan{Float64})
+        return constr_obj.set.lower
+      elseif (constr_obj.set isa MOI.LessThan{Float64})
+        return constr_obj.set.upper
+      end
+  end
+
+  function violatedConstraints(constraints::ModelConstraints, point::Vector{Float64})
+    violated = []
+    is_feasible = true
+    violated_weight = 0
+    m = length(constraints.constraints)
+
+    LHSData = constraints.data.A * point
+
+    # =, >=, <=
+    #violationContrVector = LHSData .< constraints.data.b_lower - EPS
+    #violationContrVector = violationContrVector .& (LHSData .> constraints.data.b_upper + EPS)
+    #violatedVarVector = point .< constraints.data.x_lower - EPS
+    #violatedVarVector = violatedVarVector .& (point .> constraints.data.x_lower + EPS)
+
+    for i in 1:m
+      violation = false
+      LHS = getLHSData(constraints, LHSData, point, i)
+      RHS = getRHSData(constraints, i)
+      constr_obj = constraint_object(constraints.constraints[i]).set
+      if (constr_obj isa MOI.EqualTo{Float64} && abs(LHS - RHS) > EPS)
+        violation = true
+        is_feasible = false
+      elseif (constr_obj isa MOI.GreaterThan{Float64} && LHS - RHS < -EPS)
+        violation = true
+        is_feasible = false
+      elseif (constr_obj isa MOI.LessThan{Float64} && LHS - RHS > EPS)
+        violation = true
+        is_feasible = false
+      end
+
+      if violation
+          push!(violated, i)
+          violated_weight += constraints.weights[i]
+      end
+    end
+
+    return is_feasible, violated, violated_weight
+  end
 
   function violatedConstraints(constraints::ModelConstraints, variableMap::Dict{VariableRef, VariableRef}, point::Dict{VariableRef, Float64})
     violated = []
     is_feasible = true
+    violated_weight = 0
 
     # Check variable bounds (implicit constraints)
+    m = length(constraints.constraints)
     i = 1
-    #for (var, (lower, upper)) in constraints.varBounds
-    #  val = point[var]
-    #  if val < lower || val > upper 
-    #    push!(violated, i)
-    #  end 
-    #  i += 1
-    #end
 
     for con_ref in constraints.constraints
       con_obj = constraint_object(con_ref)
@@ -236,17 +292,17 @@ module CLARKSON
 
       violation = false
       if isa(set, MOI.LessThan{Float64})
-        if eval_val > set.upper
+        if eval_val - set.upper > EPS
           violation = true
           is_feasible = false
         end
       elseif isa(set, MOI.GreaterThan{Float64})
-        if eval_val < set.lower
+        if eval_val - set.lower < -EPS
           violation = true
           is_feasible = false
         end
       elseif isa(set, MOI.EqualTo{Float64})
-        if eval_val != set.value
+        if abs(eval_val - set.value) > EPS
           violation = true
           is_feasible = false
         end
@@ -254,28 +310,29 @@ module CLARKSON
 
       if violation
           push!(violated, i)
+          violated_weight += constraints.weights[i]
       end
       i += 1
     end
 
-    return is_feasible, violated
+    return is_feasible, violated, violated_weight
   end
 
 
-  function sample(model::ModelConstraints)
-    sample = rand(1:model.totalWeight)
-    accumulator = 0
-    i = 0
-    for S in model.buckets.buckets
-      accumulator += length(S) * 2^i
-      if sample <= accumulator
-        #return S[rand(1:length(S))]
-        return rand(collect(S))
-      end
-      i += 1
-    end
-    error("Invalid sample")
-  end
+  #function sample(model::ModelConstraints)
+  #  sample = rand(1:model.totalWeight)
+  #  accumulator = 0
+  #  i = 0
+  #  for S in model.buckets.buckets
+  #    accumulator += length(S) * 2^i
+  #    if sample <= accumulator
+  #      #return S[rand(1:length(S))]
+  #      return rand(collect(S))
+  #    end
+  #    i += 1
+  #  end
+  #  error("Invalid sample")
+  #end
 
   function sample(model::ModelConstraints, r::Int)
     #samples = Vector{Int}();
@@ -283,7 +340,10 @@ module CLARKSON
     #  push!(samples, sample(model))
     #end
     #return samples
-    rand(model.rng, model.weights, r)
+    println("Sampling: Start")
+    ret = rand(model.rng, model.weights, r)
+    println("Sampling: End")
+    return sort(unique(ret))
   end
 
   # clarkson(model)
@@ -314,39 +374,109 @@ module CLARKSON
     # Get number of constraints and number of variables in MPS file.
     #r = n
     r = 6*n^2
+    r = 2*n*trunc(Int64, log2(n)+1)
     # NOTE: We use base 2 to represent weights. So initializing all weights to
     # 0 represents each element has weight 2^0 = 1.
 
+    numOfViolatedIterates = []
+    optimalityIterates = []
+    timeToOptimize = []
+    timeToCheckConstraints = []
+    objValues = []
     while true
       # Sampling procedure:
       R = sample(constraints, r)
       newModel, variableMap = createBaseModel(model)
       addConstraints(newModel, constraints, variableMap, R)
-      set_optimizer(newModel, Gurobi.Optimizer)
+      set_optimizer(newModel, () -> Gurobi.Optimizer(Gurobi.Env()))
+
+      #set_attribute(model, "Threads", Threads.nthreads())
+      set_attribute(newModel, "InfUnbdInfo", 1)
+      #set_attribute(newModel, "Presolve", 0)
+      #set_attribute(newModel, "DualReductions", 0)
+      #set_attribute(newModel, "Method", 0)
+      #write_to_file(newModel, "model-squared.mps")
+      #set_silent(newModel)
       # Solve base case.
-      set_silent(newModel)
+      startTime = time_ns()
       optimize!(newModel)
+      endTime = time_ns()
+      push!(timeToOptimize, (endTime - startTime)/1e9)
       status = termination_status(newModel)
       optimalPrimal = nothing
+      y = nothing
+      println(status)
+      push!(optimalityIterates, status)
       if status == MOI.OPTIMAL
         # Extract the optimal solution.
-        optimalPrimal = Dict(zip(all_variables(newModel), value(all_variables(newModel))))
+        #optimalPrimal = Dict(zip(all_variables(newModel), value(all_variables(newModel))))
+        optimalPrimal = value(all_variables(newModel))
+        #y = shadow_price.(all_constraints(newModel, include_variable_in_set_constraints=false))
+        #dual_reduced_cost = constraints.data.b_lower - constraints.data.A * x
+        #dual_reduced_cost = constraints.data.b_upper - constraints.data.A * x
+        push!(objValues, objective_value(newModel))
+
+      elseif status == MOI.DUAL_INFEASIBLE && primal_status(newModel) == MOI.INFEASIBILITY_CERTIFICATE
+        unbounded_ray = value(all_variables(newModel))
+        set_objective(newModel, objective_sense(newModel), 0)
+        optimize!(newModel)
+        println("The sampled LP is unbounded.")
+        #optimalPrimal = Dict(zip(all_variables(newModel), 100 * unbounded_ray + value(all_variables(newModel))))
+        optimalPrimal = 100 * unbounded_ray + value(all_variables(newModel))
+        push!(objValues, NaN)
+      elseif status == MOI.INFEASIBLE
+        println("The original LP is infeasible.")
+        return false
       else
         println("Base case did not have an optimal solution. Continue to next iteration...")
         continue
       end
       # Check violated constraints
-      is_feasible, V = violatedConstraints(constraints, variableMap, optimalPrimal)
+      #is_feasible, V, violated_weight = violatedConstraints(constraints, variableMap, optimalPrimal)
+      startTime = time_ns()
+      is_feasible, V, violated_weight = violatedConstraints(constraints, optimalPrimal)
+      endTime = time_ns()
+      push!(timeToCheckConstraints, (endTime - startTime)/1e9)
+      println("There are: ", length(V), " constraints violated.")
+      println("The weight of violated constraints are: ", violated_weight)
+      println("The current threshold is: ", (2*n*constraints.totalWeight)/r)
+      #println("shadow price:", y)
+      push!(numOfViolatedIterates, length(V))
       if isempty(V)
+        println("Violations: ", numOfViolatedIterates)
+        println("Optimality: ", optimalityIterates)
+        println("Time to optimize: ", timeToOptimize)
+        println("Time to check violation: ", timeToCheckConstraints)
+        println("Objective: ", objValues)
+        println("Relative Objective: ", [abs(o - objective_value(newModel))/objective_value(newModel) for o in objValues])
         return objective_value(newModel), optimalPrimal
         # Note our totalWeight can always be bounded by m^2, since |H| <=
         # (1+1/(3n))^{n ln(m)} m ~ m^2
-      elseif length(V) < (2*n*constraints.totalWeight)/r
+      elseif violated_weight < (2*n*constraints.totalWeight)/r
         for v in V
-          updateWeight(constraints, v)
+          updateWeight(constraints, v, 2.0)
         end
+        if y != nothing
+          for i in 1:length(R)
+            if abs(y[i]) > EPS
+              updateWeight(constraints, R[i], 1.5)
+            end
+          end
+        end
+      else
+        data = lp_matrix_data(model)
+        x = value(all_variables(newModel))
+        println(data.A * x - data.b_lower, data.b_upper - data.A * x)
+        println("Not updated becuase too many constraints are violated.")
       end
-    end 
+      #if status == MOI.OPTIMAL
+      #  r = 6*n^2
+      #end
+      if length(V) <= 100
+        r = 6*n^2
+      end
+    end # While end
+
   end
 
   export clarkson
