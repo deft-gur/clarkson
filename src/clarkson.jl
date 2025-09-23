@@ -234,35 +234,53 @@ module CLARKSON
     violated_weight = 0
     m = length(constraints.constraints)
 
+    startTime = time_ns()
     LHSData = constraints.data.A * point
+    endTime = time_ns()
+    println("time to calculate Ax: ", (endTime - startTime)/1e9)
 
     # =, >=, <=
-    #violationContrVector = LHSData .< constraints.data.b_lower - EPS
-    #violationContrVector = violationContrVector .& (LHSData .> constraints.data.b_upper + EPS)
+    violationConstrVector = LHSData .>= (constraints.data.b_lower - EPS * ones(m))
+    violationConstrVector = violationConstrVector .& (LHSData .<= (constraints.data.b_upper + EPS * ones(m)))
     #violatedVarVector = point .< constraints.data.x_lower - EPS
     #violatedVarVector = violatedVarVector .& (point .> constraints.data.x_lower + EPS)
-
+    startTime = time_ns()
     for i in 1:m
-      violation = false
-      LHS = getLHSData(constraints, LHSData, point, i)
-      RHS = getRHSData(constraints, i)
-      constr_obj = constraint_object(constraints.constraints[i]).set
-      if (constr_obj isa MOI.EqualTo{Float64} && abs(LHS - RHS) > EPS)
-        violation = true
-        is_feasible = false
-      elseif (constr_obj isa MOI.GreaterThan{Float64} && LHS - RHS < -EPS)
-        violation = true
-        is_feasible = false
-      elseif (constr_obj isa MOI.LessThan{Float64} && LHS - RHS > EPS)
-        violation = true
-        is_feasible = false
-      end
-
-      if violation
-          push!(violated, i)
-          violated_weight += constraints.weights[i]
+      if (violationConstrVector[i] == false)
+       push!(violated, i)
+       violated_weight += constraints.weights[i]
+       is_feasible = false
       end
     end
+    endTime = time_ns()
+    println("time to check violation: ", (endTime - startTime)/1e9)
+
+
+
+    #startTime = time_ns()
+    #for i in 1:m
+    #  violation = false
+    #  LHS = getLHSData(constraints, LHSData, point, i)
+    #  RHS = getRHSData(constraints, i)
+    #  constr_obj = constraint_object(constraints.constraints[i]).set
+    #  if (constr_obj isa MOI.EqualTo{Float64} && abs(LHS - RHS) > EPS)
+    #    violation = true
+    #    is_feasible = false
+    #  elseif (constr_obj isa MOI.GreaterThan{Float64} && LHS - RHS < -EPS)
+    #    violation = true
+    #    is_feasible = false
+    #  elseif (constr_obj isa MOI.LessThan{Float64} && LHS - RHS > EPS)
+    #    violation = true
+    #    is_feasible = false
+    #  end
+
+    #  if violation
+    #    push!(violated, i)
+    #    violated_weight += constraints.weights[i]
+    #  end
+    #end
+    #endTime = time_ns()
+    #println("time to check violation", (endTime - startTime)/1e9)
 
     return is_feasible, violated, violated_weight
   end
