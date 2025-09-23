@@ -400,12 +400,24 @@ module CLARKSON
     optimalityIterates = []
     timeToOptimize = []
     timeToCheckConstraints = []
+    timeToSample = []
+    timeToCreateBaseModel = []
+    timeToAddConstraints = []
     objValues = []
     while true
       # Sampling procedure:
+      startTime = time_ns()
       R = sample(constraints, r)
+      endTime = time_ns()
+      push!(timeToSample, (endTime - startTime)/1e9)
+      startTime = time_ns()
       newModel, variableMap = createBaseModel(model)
+      endTime = time_ns()
+      push!(timeToCreateBaseModel, (endTime - startTime)/1e9)
+      startTime = time_ns()
       addConstraints(newModel, constraints, variableMap, R)
+      endTime = time_ns()
+      push!(timeToAddConstraints, (endTime - startTime)/1e9)
       set_optimizer(newModel, () -> Gurobi.Optimizer(Gurobi.Env()))
 
       #set_attribute(model, "Threads", Threads.nthreads())
@@ -465,6 +477,9 @@ module CLARKSON
         println("Optimality: ", optimalityIterates)
         println("Time to optimize: ", timeToOptimize)
         println("Time to check violation: ", timeToCheckConstraints)
+        println("Time to sample: ", timeToSample)
+        println("Time to create base model: ", timeToCreateBaseModel)
+        println("Time to add constraints: ", timeToAddConstraints)
         println("Objective: ", objValues)
         println("Relative Objective: ", [abs(o - objective_value(newModel))/objective_value(newModel) for o in objValues])
         return objective_value(newModel), optimalPrimal
@@ -475,9 +490,10 @@ module CLARKSON
           updateWeight(constraints, v, 2.0)
         end
         if y != nothing
+          println("y:", y)
           for i in 1:length(R)
             if abs(y[i]) > EPS
-              updateWeight(constraints, R[i], 1.5)
+              updateWeight(constraints, R[i], 9.0)
             end
           end
         end
