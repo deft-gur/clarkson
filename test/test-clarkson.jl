@@ -2,7 +2,7 @@ using JuMP, Gurobi
 using Profile
 
 include("../src/clarkson.jl")
-using .CLARKSON
+using .clarkson
 
 # check_feasibility_and_objective(model, sol)
 #
@@ -82,7 +82,7 @@ end
 function test_clarkson(filename::String)
   tol = 1e-6
   model = read_from_file(filename)
-  obj, sol = @time clarkson(model)
+  obj, sol = @time Clarkson(model)
 
   set_optimizer(model, Gurobi.Optimizer)
   set_silent(model)

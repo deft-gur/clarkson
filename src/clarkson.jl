@@ -1,4 +1,4 @@
-module CLARKSON
+module clarkson
   using DataStructures
   using JuMP, Gurobi
   using Random, WeightVectors
@@ -364,13 +364,13 @@ module CLARKSON
     return sort(unique(ret))
   end
 
-  # clarkson(model)
+  # Clarkson(model)
   #
   # Input: model containing the LP.
   #
   # Output: Return an optimal value and primal solution to the LP.
   #
-  function clarkson(model::Model)
+  function Clarkson(model::Model)
     # Initial setup stage:
     constraintTypes = list_of_constraint_types(model)
     constraints = ModelConstraints(model)
@@ -513,5 +513,5 @@ module CLARKSON
 
   end
 
-  export clarkson
-end
+  export Clarkson
+end # module clarkson
