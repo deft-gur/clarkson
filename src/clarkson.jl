@@ -5,39 +5,6 @@ module clarkson
 
   EPS = 1e-6
 
-  struct BucketSystem{T}
-      buckets::Vector{Set{T}}
-  end
-
-  # Constructor to initialize with n levels
-  function BucketSystem{T}(num_levels::Int) where T
-      return BucketSystem([Set{T}() for _ in 1:num_levels])
-  end
-
-  # Function to add an element to a specific level
-  function add_to_bucket!(bs::BucketSystem{T}, level::Int, elem::T) where T
-      1 <= level <= length(bs.buckets) || error("Invalid level")
-      push!(bs.buckets[level], elem)
-  end
-
-  # Function to promote elements from one level to the next (or any upper level)
-  function promote!(bs::BucketSystem{T}, from_level::Int, to_level::Int, elements::Vector{T}) where T
-      1 <= from_level <= length(bs.buckets) || error("Invalid levels")
-      if (from_level == to_level)
-        return
-      end
-
-      for elem in elements
-          if elem in bs.buckets[from_level]
-              delete!(bs.buckets[from_level], elem)
-              if (to_level > length(bs.buckets))
-                push!(bs.buckets, Set{T}())
-              end
-              push!(bs.buckets[to_level], elem)
-          end
-      end
-  end
-
   mutable struct ModelConstraints
       constraints::Vector{ConstraintRef}
       numConstraints::Int64
@@ -264,107 +231,10 @@ module clarkson
     endTime = time_ns()
     println("time to check violation: ", (endTime - startTime)/1e9)
 
-    #startTime = time_ns()
-    #for i in 1:m
-    #  violation = false
-    #  LHS = getLHSData(constraints, LHSData, point, i)
-    #  RHS = getRHSData(constraints, i)
-    #  constr_obj = constraint_object(constraints.constraints[i]).set
-    #  if (constr_obj isa MOI.EqualTo{Float64} && abs(LHS - RHS) > EPS)
-    #    violation = true
-    #    is_feasible = false
-    #  elseif (constr_obj isa MOI.GreaterThan{Float64} && LHS - RHS < -EPS)
-    #    violation = true
-    #    is_feasible = false
-    #  elseif (constr_obj isa MOI.LessThan{Float64} && LHS - RHS > EPS)
-    #    violation = true
-    #    is_feasible = false
-    #  end
-
-    #  if violation
-    #    push!(violated, i)
-    #    violated_weight += constraints.weights[i]
-    #  end
-    #end
-    #endTime = time_ns()
-    #println("time to check violation", (endTime - startTime)/1e9)
-
     return is_feasible, violated, violated_weight
   end
-
-  function violatedConstraints(constraints::ModelConstraints, variableMap::Dict{VariableRef, VariableRef}, point::Dict{VariableRef, Float64})
-    violated = []
-    is_feasible = true
-    violated_weight = 0
-
-    # Check variable bounds (implicit constraints)
-    m = length(constraints.constraints)
-    i = 1
-
-    for con_ref in constraints.constraints
-      con_obj = constraint_object(con_ref)
-      func = con_obj.func
-      set = con_obj.set
-
-      if func isa VariableRef
-        eval_val = point[variableMap[func]]
-      else
-        eval_val = func.constant
-        for (var, coef) in func.terms
-          eval_val += coef * point[variableMap[var]]
-        end
-      end
-
-      violation = false
-      if isa(set, MOI.LessThan{Float64})
-        if eval_val - set.upper > EPS
-          violation = true
-          is_feasible = false
-        end
-      elseif isa(set, MOI.GreaterThan{Float64})
-        if eval_val - set.lower < -EPS
-          violation = true
-          is_feasible = false
-        end
-      elseif isa(set, MOI.EqualTo{Float64})
-        if abs(eval_val - set.value) > EPS
-          violation = true
-          is_feasible = false
-        end
-      end
-
-      if violation
-          push!(violated, i)
-          violated_weight += constraints.weights[i]
-      end
-      i += 1
-    end
-
-    return is_feasible, violated, violated_weight
-  end
-
-
-  #function sample(model::ModelConstraints)
-  #  sample = rand(1:model.totalWeight)
-  #  accumulator = 0
-  #  i = 0
-  #  for S in model.buckets.buckets
-  #    accumulator += length(S) * 2^i
-  #    if sample <= accumulator
-  #      #return S[rand(1:length(S))]
-  #      return rand(collect(S))
-  #    end
-  #    i += 1
-  #  end
-  #  error("Invalid sample")
-  #end
 
   function sample(model::ModelConstraints, r::Int)
-    #samples = Vector{Int}();
-    #for i in 1:r
-    #  push!(samples, sample(model))
-    #end
-    #return samples
     println("Sampling: Start")
     ret = rand(model.rng, model.weights, r)
     println("Sampling: End")
@@ -381,26 +251,9 @@ module clarkson
     # Initial setup stage:
     constraintTypes = list_of_constraint_types(model)
     constraints = ModelConstraints(model)
-    # First insert all the variable lower and upper bounds then insert affine
-    # constraints.
-    #for F, S in constraintTypes
-    #  if F isa VariableRef
-    #  append!(constraints, all_constraints(model, F, S))
-    #end
-    #for F, S in constraintTypes
-    #  if !(F isa VariableRef)
-    #  append!(constraints, all_constraints(model, F, S))
-    #end
-
-    #m = length(constraints.numVarBounds + constraints.numAffConstraints)
     m = length(all_constraints(model; include_variable_in_set_constraints = true))
     n = length(all_variables(model))
-
-    # Get number of constraints and number of variables in MPS file.
-    #r = n
     r = 6*n^2
-    # NOTE: We use base 2 to represent weights. So initializing all weights to
-    # 0 represents each element has weight 2^0 = 1.
 
     numOfViolatedIterates = []
     optimalityIterates = []
@@ -457,7 +310,6 @@ module clarkson
         set_objective(newModel, objective_sense(newModel), 0)
         optimize!(newModel)
         println("The sampled LP is unbounded.")
-        #optimalPrimal = Dict(zip(all_variables(newModel), 100 * unbounded_ray + value(all_variables(newModel))))
         optimalPrimal = 100 * unbounded_ray + value(all_variables(newModel))
         push!(objValues, NaN)
       elseif status == MOI.INFEASIBLE
@@ -468,7 +320,6 @@ module clarkson
         continue
       end
       # Check violated constraints
-      #is_feasible, V, violated_weight = violatedConstraints(constraints, variableMap, optimalPrimal)
       startTime = time_ns()
       is_feasible, V, violated_weight = violatedConstraints(constraints, optimalPrimal)
       endTime = time_ns()
