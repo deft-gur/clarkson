@@ -60,8 +60,8 @@ module clarkson
       # with the following priority:
       #   1. Affine constraint =, >=, <=
       #   2. Variable constraint =, >=, <=
-      #constraints = all_constraints(model; include_variable_in_set_constraints = true)
-      constraints = all_constraints(model; include_variable_in_set_constraints = false)
+      constraints = all_constraints(model; include_variable_in_set_constraints = true)
+      #constraints = all_constraints(model; include_variable_in_set_constraints = false)
       i = 1
       m = length(constraints)
       data = lp_matrix_data(model)
@@ -169,10 +169,10 @@ module clarkson
     # Map VariableRef from Model to VariableRef to baseModel
     varMap = Dict{VariableRef, VariableRef}()
     for v in vars
-      lb = has_lower_bound(v) ? lower_bound(v) : -Inf
-      ub = has_upper_bound(v) ? upper_bound(v) : Inf
-      #lb = -Inf
-      #ub = Inf
+      #lb = has_lower_bound(v) ? lower_bound(v) : -Inf
+      #ub = has_upper_bound(v) ? upper_bound(v) : Inf
+      lb = -Inf
+      ub = Inf
       varMap[v] = @variable(baseModel, base_name = name(v), lower_bound=lb, upper_bound=ub)
     end
 
@@ -232,7 +232,8 @@ module clarkson
     violated = []
     is_feasible = true
     violated_weight = 0
-    m = length(constraints.constraints)
+    m = constraints.numAffConstraints
+    n = length(point)
 
     startTime = time_ns()
     LHSData = constraints.data.A * point
@@ -242,8 +243,8 @@ module clarkson
     # =, >=, <=
     violationConstrVector = LHSData .>= (constraints.data.b_lower - EPS * ones(m))
     violationConstrVector = violationConstrVector .& (LHSData .<= (constraints.data.b_upper + EPS * ones(m)))
-    #violatedVarVector = point .< constraints.data.x_lower - EPS
-    #violatedVarVector = violatedVarVector .& (point .> constraints.data.x_lower + EPS)
+    violatedVarVector = point .>= constraints.data.x_lower - EPS*ones(n)
+    violatedVarVector = violatedVarVector .& (point .<= constraints.data.x_upper + EPS*ones(n))
     startTime = time_ns()
     for i in 1:m
       if (violationConstrVector[i] == false)
@@ -252,10 +253,16 @@ module clarkson
        is_feasible = false
       end
     end
+    for i in 1:n
+      if (violatedVarVector[i] == false)
+        push!(violated, i + m)
+        violated_weight += constraints.weights[i+m]
+        is_feasible = false
+      end
+    end
+
     endTime = time_ns()
     println("time to check violation: ", (endTime - startTime)/1e9)
-
-
 
     #startTime = time_ns()
     #for i in 1:m
@@ -392,7 +399,6 @@ module clarkson
     # Get number of constraints and number of variables in MPS file.
     #r = n
     r = 6*n^2
-    r = 2*n*trunc(Int64, log2(n)+1)
     # NOTE: We use base 2 to represent weights. So initializing all weights to
     # 0 represents each element has weight 2^0 = 1.
 
@@ -502,12 +508,6 @@ module clarkson
         x = value(all_variables(newModel))
         println(data.A * x - data.b_lower, data.b_upper - data.A * x)
         println("Not updated becuase too many constraints are violated.")
-      end
-      #if status == MOI.OPTIMAL
-      #  r = 6*n^2
-      #end
-      if length(V) <= 100
-        r = 6*n^2
       end
     end # While end
 
