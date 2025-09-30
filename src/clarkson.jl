@@ -345,11 +345,7 @@ module clarkson
       push!(optimalityIterates, status)
       if status == MOI.OPTIMAL
         # Extract the optimal solution.
-        #optimalPrimal = Dict(zip(all_variables(newModel), value(all_variables(newModel))))
         optimalPrimal = value(all_variables(newModel))
-        #y = shadow_price.(all_constraints(newModel, include_variable_in_set_constraints=false))
-        #dual_reduced_cost = constraints.data.b_lower - constraints.data.A * x
-        #dual_reduced_cost = constraints.data.b_upper - constraints.data.A * x
         push!(objValues, objective_value(newModel))
 
       elseif status == MOI.DUAL_INFEASIBLE && primal_status(newModel) == MOI.INFEASIBILITY_CERTIFICATE
@@ -391,14 +387,6 @@ module clarkson
       elseif violated_weight < (2*n*modelConstraints.totalWeight)/r
         for v in V
           updateWeight(modelConstraints, v, 2.0)
-        end
-        if y != nothing
-          println("y:", y)
-          for i in 1:length(R)
-            if abs(y[i]) > EPS
-              updateWeight(modelConstraints, R[i], 9.0)
-            end
-          end
         end
       else
         data = lp_matrix_data(model)
