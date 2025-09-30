@@ -6,7 +6,7 @@ module clarkson
   EPS = 1e-6
 
   mutable struct ModelConstraints
-      constraints::Vector{ConstraintRef}
+      constraints::Vector{ScalarConstraint}
       numConstraints::Int64
       weights::WeightVectors.AbstractWeightVector
       totalWeight::Float64
@@ -20,15 +20,25 @@ module clarkson
       numVarEqualTo::Int64
       numVarLessThan::Int64
       numVarGreaterThan::Int64
+      model::Model
+      LHS::Vector{AffExpr}
+      RHS::Vector{Float64}
+      Operators::Vector{Function}
+      include_variable::Bool
   end
 
-  function ModelConstraints(model::Model)
+  function ModelConstraints(OrigModel::Model)
       # NOTE: We assume that all_constraints will return constraints
       # with the following priority:
       #   1. Affine constraint =, >=, <=
       #   2. Variable constraint =, >=, <=
-      constraints = all_constraints(model; include_variable_in_set_constraints = true)
+      include_variable = true
+      #constraints = all_constraints(model; include_variable_in_set_constraints = true)
       #constraints = all_constraints(model; include_variable_in_set_constraints = false)
+      #BaseModel = createBaseModel(model)
+      model, ref_map = copy_model(OrigModel)
+      constraints = constraint_object.(all_constraints(model; include_variable_in_set_constraints = include_variable))
+
       i = 1
       m = length(constraints)
       data = lp_matrix_data(model)
@@ -45,6 +55,43 @@ module clarkson
       numVarConstraints = numVarEqualTo + numVarLessThan + numVarGreaterThan
       numAffConstraints = numAffEqualTo + numAffLessThan + numAffGreaterThan
 
+      function getValue(set)
+        if isa(set, MOI.LessThan{Float64})
+          return set.upper
+        elseif isa(set, MOI.GreaterThan{Float64})
+          return set.lower
+        elseif isa(set, MOI.EqualTo{Float64})
+          return set.value
+        else
+          # Throw an exception later.
+          exit(1)
+        end
+      end
+
+      function getOperator(set)
+        if isa(set, MOI.LessThan{Float64})
+          return <=
+        elseif isa(set, MOI.GreaterThan{Float64})
+          return >=
+        elseif isa(set, MOI.EqualTo{Float64})
+          return ==
+        else
+          # Throw an exception later.
+          exit(1)
+        end
+      end
+
+      A = data.A
+      LHS = []
+      RHS = []
+      Operators = []
+      #LHS = A * data.variables
+      #RHS = [ getValue(c.set) for c in constraint_object.(data.affine_constraints)]
+      #Operators = [ getOperator(c.set) for c in constraint_object.(data.affine_constraints)]
+      #LHS = vcat(LHS, [ c.func for c in constraint_object.(data.variable_constraints)])
+      #RHS = vcat(RHS, [ getValue(c.set) for c in constraint_object.(data.variable_constraints)])
+      #Operators = vcat(Operators, [ getOperator(c.set) for c in constraint_object.(data.variable_constraints)])
+
       return ModelConstraints(
         constraints,
         length(constraints),
@@ -59,7 +106,12 @@ module clarkson
         numVarConstraints,
         numVarEqualTo,
         numVarLessThan,
-        numVarGreaterThan
+        numVarGreaterThan,
+        model,
+        LHS,
+        RHS,
+        Operators,
+        include_variable
         )
   end
 
@@ -85,40 +137,26 @@ module clarkson
     Constraints.weights[i] *= mul 
   end
 
-  # addConstraints(model, constraints, variableMap, R)
+  # addConstraints(constraints, R)
   #
   # Input:
-  #   model, a optimization model
   #   constraints, set of constraints
-  #   variableMap, maps VariableRef from constraints to the corresponding
-  #                VariableRef in model.
-  #   R, a sampled set such that R[i] is a valid index of constraints.
+  #   R, a sampled sorted vector such that R[i] is a valid index of constraints.
   #
   # Post: 
   #   model is modified such that all constraints represented by R is added in.
   #
   # Output: None
   #
-  function addConstraints(model::Model, constraints::ModelConstraints,
-      variableMap::Dict{VariableRef, VariableRef}, R::Vector{Int})
-    for i in R
-      con = getConstraint(constraints, i)
-      con_obj = constraint_object(con)
-      func = con_obj.func
-      set = con_obj.set
-      new_func = nothing
-      if func isa VariableRef
-        new_func = variableMap[func]
-      else
-        new_func = sum(coef * variableMap[var] for (var, coef) in func.terms) + func.constant
-      end
-      if isa(set, MOI.LessThan{Float64})
-        @constraint(model, new_func <= set.upper)
-      elseif isa(set, MOI.GreaterThan{Float64})
-        @constraint(model, new_func >= set.lower)
-      elseif isa(set, MOI.EqualTo{Float64})
-        @constraint(model, new_func == set.value)
-      end
+  function addConstraints(ModelConstraints::ModelConstraints,
+      R::Vector{Int})
+    #affRIdx = searchsortedfirst(R, constraints.numAffConstraints, lt=<=)
+    #if (constraints.numAffEqualTo != 0)
+    #  @constraint(model, )
+    #end
+
+    for c in ModelConstraints.constraints[R]
+      add_constraint(ModelConstraints.model, c)
     end
   end
 
@@ -164,7 +202,7 @@ module clarkson
     return baseModel, varMap
   end
 
-  function getLHSData(constraints, LHSData, point, i)
+  function getLHSData(constraints::ModelConstraints, LHSData, point, i)
     constr_obj = constraint_object(constraints.constraints[i])
     func = constr_obj.func
 
@@ -184,7 +222,7 @@ module clarkson
     end
   end
 
-  function getRHSData(constraints, i)
+  function getRHSData(constraints::ModelConstraints, i)
     constr_obj = constraint_object(constraints.constraints[i])
       if (constr_obj.set isa MOI.EqualTo{Float64})
         return constr_obj.set.value
@@ -234,11 +272,29 @@ module clarkson
     return is_feasible, violated, violated_weight
   end
 
-  function sample(model::ModelConstraints, r::Int)
-    println("Sampling: Start")
+  function sample(model::ModelConstraints, r::Int64)
     ret = rand(model.rng, model.weights, r)
-    println("Sampling: End")
     return sort(unique(ret))
+  end
+
+  function clearConstraints(model::Model, include_variable::Bool)
+    println("clearing constriants")
+    startTime = time_ns()
+    constraints = all_constraints(model, include_variable_in_set_constraints=include_variable)
+    for c in constraints
+      delete(model, c)
+    end
+    endTime = time_ns()
+    println("finish clearing: ", (endTime - startTime)/1e9)
+
+    set_optimizer(model, () -> Gurobi.Optimizer(Gurobi.Env()))
+    #set_attribute(model, "Threads", Threads.nthreads())
+    set_attribute(model, "InfUnbdInfo", 1)
+    #set_attribute(model, "Presolve", 0)
+    #set_attribute(model, "DualReductions", 0)
+    #set_attribute(model, "Method", 0)
+    #write_to_file(model, "model-squared.mps")
+    #set_silent(model)
   end
 
   # Clarkson(model)
@@ -250,8 +306,7 @@ module clarkson
   function Clarkson(model::Model)
     # Initial setup stage:
     constraintTypes = list_of_constraint_types(model)
-    constraints = ModelConstraints(model)
-    m = length(all_constraints(model; include_variable_in_set_constraints = true))
+    modelConstraints = ModelConstraints(model)
     n = length(all_variables(model))
     r = 6*n^2
 
@@ -266,26 +321,18 @@ module clarkson
     while true
       # Sampling procedure:
       startTime = time_ns()
-      R = sample(constraints, r)
+      @time clearConstraints(modelConstraints.model, modelConstraints.include_variable)
+      R = sample(modelConstraints, r)
       endTime = time_ns()
       push!(timeToSample, (endTime - startTime)/1e9)
       startTime = time_ns()
-      newModel, variableMap = createBaseModel(model)
-      endTime = time_ns()
-      push!(timeToCreateBaseModel, (endTime - startTime)/1e9)
-      startTime = time_ns()
-      addConstraints(newModel, constraints, variableMap, R)
+      addConstraints(modelConstraints, R)
       endTime = time_ns()
       push!(timeToAddConstraints, (endTime - startTime)/1e9)
+      println("Time to add constraints: ", timeToAddConstraints)
+      newModel, _ = copy_model(modelConstraints.model)
       set_optimizer(newModel, () -> Gurobi.Optimizer(Gurobi.Env()))
-
-      #set_attribute(model, "Threads", Threads.nthreads())
       set_attribute(newModel, "InfUnbdInfo", 1)
-      #set_attribute(newModel, "Presolve", 0)
-      #set_attribute(newModel, "DualReductions", 0)
-      #set_attribute(newModel, "Method", 0)
-      #write_to_file(newModel, "model-squared.mps")
-      #set_silent(newModel)
       # Solve base case.
       startTime = time_ns()
       optimize!(newModel)
@@ -321,12 +368,12 @@ module clarkson
       end
       # Check violated constraints
       startTime = time_ns()
-      is_feasible, V, violated_weight = violatedConstraints(constraints, optimalPrimal)
+      is_feasible, V, violated_weight = violatedConstraints(modelConstraints, optimalPrimal)
       endTime = time_ns()
       push!(timeToCheckConstraints, (endTime - startTime)/1e9)
       println("There are: ", length(V), " constraints violated.")
       println("The weight of violated constraints are: ", violated_weight)
-      println("The current threshold is: ", (2*n*constraints.totalWeight)/r)
+      println("The current threshold is: ", (2*n*modelConstraints.totalWeight)/r)
       #println("shadow price:", y)
       push!(numOfViolatedIterates, length(V))
       if isempty(V)
@@ -335,22 +382,21 @@ module clarkson
         println("Time to optimize: ", timeToOptimize)
         println("Time to check violation: ", timeToCheckConstraints)
         println("Time to sample: ", timeToSample)
-        println("Time to create base model: ", timeToCreateBaseModel)
         println("Time to add constraints: ", timeToAddConstraints)
         println("Objective: ", objValues)
         println("Relative Objective: ", [abs(o - objective_value(newModel))/objective_value(newModel) for o in objValues])
         return objective_value(newModel), optimalPrimal
         # Note our totalWeight can always be bounded by m^2, since |H| <=
         # (1+1/(3n))^{n ln(m)} m ~ m^2
-      elseif violated_weight < (2*n*constraints.totalWeight)/r
+      elseif violated_weight < (2*n*modelConstraints.totalWeight)/r
         for v in V
-          updateWeight(constraints, v, 2.0)
+          updateWeight(modelConstraints, v, 2.0)
         end
         if y != nothing
           println("y:", y)
           for i in 1:length(R)
             if abs(y[i]) > EPS
-              updateWeight(constraints, R[i], 9.0)
+              updateWeight(modelConstraints, R[i], 9.0)
             end
           end
         end
