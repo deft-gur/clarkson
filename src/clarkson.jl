@@ -32,7 +32,7 @@ module clarkson
       # with the following priority:
       #   1. Affine constraint =, >=, <=
       #   2. Variable constraint =, >=, <=
-      include_variable = false
+      include_variable = true
       #constraints = all_constraints(model; include_variable_in_set_constraints = true)
       #constraints = all_constraints(model; include_variable_in_set_constraints = false)
       #BaseModel = createBaseModel(model)
@@ -236,7 +236,8 @@ module clarkson
     violated = []
     is_feasible = true
     violated_weight = 0
-    m = length(constraints.constraints)
+    m = constraints.numAffConstraints
+    n = length(point)
 
     startTime = time_ns()
     LHSData = constraints.data.A * point
@@ -246,14 +247,21 @@ module clarkson
     # =, >=, <=
     violationConstrVector = LHSData .>= (constraints.data.b_lower - EPS * ones(m))
     violationConstrVector = violationConstrVector .& (LHSData .<= (constraints.data.b_upper + EPS * ones(m)))
-    #violatedVarVector = point .< constraints.data.x_lower - EPS
-    #violatedVarVector = violatedVarVector .& (point .> constraints.data.x_lower + EPS)
+        violatedVarVector = point .>= constraints.data.x_lower - EPS*ones(n)
+    violatedVarVector = violatedVarVector .& (point .<= constraints.data.x_upper + EPS*ones(n))
     startTime = time_ns()
     for i in 1:m
       if (violationConstrVector[i] == false)
        push!(violated, i)
        violated_weight += constraints.weights[i]
        is_feasible = false
+      end
+    end
+    for i in 1:n
+      if (violatedVarVector[i] == false)
+        push!(violated, i + m)
+        violated_weight += constraints.weights[i+m]
+        is_feasible = false
       end
     end
     endTime = time_ns()
