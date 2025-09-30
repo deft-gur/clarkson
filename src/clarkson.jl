@@ -33,9 +33,6 @@ module clarkson
       #   1. Affine constraint =, >=, <=
       #   2. Variable constraint =, >=, <=
       include_variable = true
-      #constraints = all_constraints(model; include_variable_in_set_constraints = true)
-      #constraints = all_constraints(model; include_variable_in_set_constraints = false)
-      #BaseModel = createBaseModel(model)
       model, ref_map = copy_model(OrigModel)
       constraints = constraint_object.(all_constraints(model; include_variable_in_set_constraints = include_variable))
       i = 1
@@ -159,79 +156,6 @@ module clarkson
     end
   end
 
-  # createBaseModel(model)
-  #
-  # Input: model
-  #
-  # Output: newModel, varMap
-  #   newModel, is a newModel containing all variables from model.
-  #   variableMap, maps VariableRef from constraints to the corresponding
-  #                VariableRef in model.
-  function createBaseModel(model)
-    baseModel = Model()
-    vars = all_variables(model)
-    # Map VariableRef from Model to VariableRef to baseModel
-    varMap = Dict{VariableRef, VariableRef}()
-    for v in vars
-      lb = has_lower_bound(v) ? lower_bound(v) : -Inf
-      ub = has_upper_bound(v) ? upper_bound(v) : Inf
-      #lb = -Inf
-      #ub = Inf
-      varMap[v] = @variable(baseModel, base_name = name(v), lower_bound=lb, upper_bound=ub)
-    end
-
-    obj_sense = objective_sense(model)
-    obj_func = objective_function(model)
-    if obj_func isa VariableRef
-      new_obj = varMap[obj_func]
-    elseif obj_func isa AffExpr
-      new_obj = AffExpr(obj_func.constant)
-      for (var, coef) in obj_func.terms
-        new_obj += coef * varMap[var]
-      end
-    #elseif obj_func isa QuadExpr
-    #  new_obj = QuadExpr(obj_func.aff)
-    #  for (pair, coef) in obj_func.terms
-    #    new_obj += coef * varMap[pair.a] * varMap[pair.b]
-    #  end
-    else
-      error("Unsupported objective type: $(typeof(obj_func))")
-    end
-    set_objective(baseModel, obj_sense, new_obj)
-    return baseModel, varMap
-  end
-
-  function getLHSData(constraints::ModelConstraints, LHSData, point, i)
-    constr_obj = constraint_object(constraints.constraints[i])
-    func = constr_obj.func
-
-    if (func isa VariableRef)
-      return point[func.index.value]
-      if (constr_obj.set isa MOI.EqualTo{Float64})
-        return point[i - constraints.numAffConstraints]
-      elseif (constr_obj.set isa MOI.GreaterThan{Float64})
-        return point[i - constraints.numAffConstraints - constraints.numVarEqualTo]
-      else
-        return point[i - constraints.numAffConstraints - constraints.numVarEqualTo - constraints.numVarGreaterThan]
-      end
-    elseif (func isa AffExpr)
-      return LHSData[i]
-    else
-      throw(ErrorException("Cannot determine if it is AffExpr or VariableRef."))
-    end
-  end
-
-  function getRHSData(constraints::ModelConstraints, i)
-    constr_obj = constraint_object(constraints.constraints[i])
-      if (constr_obj.set isa MOI.EqualTo{Float64})
-        return constr_obj.set.value
-      elseif (constr_obj.set isa MOI.GreaterThan{Float64})
-        return constr_obj.set.lower
-      elseif (constr_obj.set isa MOI.LessThan{Float64})
-        return constr_obj.set.upper
-      end
-  end
-
   function violatedConstraints(constraints::ModelConstraints, point::Vector{Float64})
     violated = []
     is_feasible = true
@@ -314,7 +238,6 @@ module clarkson
     timeToOptimize = []
     timeToCheckConstraints = []
     timeToSample = []
-    timeToCreateBaseModel = []
     timeToAddConstraints = []
     objValues = []
     while true
@@ -328,7 +251,6 @@ module clarkson
       addConstraints(modelConstraints, R)
       endTime = time_ns()
       push!(timeToAddConstraints, (endTime - startTime)/1e9)
-      println("Time to add constraints: ", timeToAddConstraints)
       newModel, _ = copy_model(modelConstraints.model)
       set_optimizer(newModel, () -> Gurobi.Optimizer(Gurobi.Env()))
       set_attribute(newModel, "InfUnbdInfo", 1)
@@ -400,9 +322,6 @@ module clarkson
           end
         end
       else
-        data = lp_matrix_data(model)
-        x = value(all_variables(newModel))
-        println(data.A * x - data.b_lower, data.b_upper - data.A * x)
         println("Not updated becuase too many constraints are violated.")
       end
       #if status == MOI.OPTIMAL
