@@ -158,7 +158,7 @@ module clarkson
 
   function violatedConstraints(constraints::ModelConstraints, point::Vector{Float64})
     violated = []
-    is_feasible = true
+    is_feasible = false
     violated_weight = 0
     m = constraints.numAffConstraints
     n = length(point)
