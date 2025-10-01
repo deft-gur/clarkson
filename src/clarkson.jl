@@ -2,6 +2,7 @@ module clarkson
   using DataStructures
   using JuMP, Gurobi
   using Random, WeightVectors
+  using LinearAlgebra
 
   EPS = 1e-6
 
@@ -34,10 +35,10 @@ module clarkson
       #   2. Variable constraint =, >=, <=
       include_variable = true
       model, ref_map = copy_model(OrigModel)
-      constraints = constraint_object.(all_constraints(model; include_variable_in_set_constraints = include_variable))
+      constraints = @time constraint_object.(all_constraints(model; include_variable_in_set_constraints = include_variable))
       i = 1
       m = length(constraints)
-      data = lp_matrix_data(model)
+      data = @time lp_matrix_data(model)
       numAffEqualTo = length(all_constraints(model, AffExpr, MOI.EqualTo{Float64}))
       numAffLessThan = length(all_constraints(model, AffExpr, MOI.LessThan{Float64}))
       numAffGreaterThan = length(all_constraints(model, AffExpr, MOI.GreaterThan{Float64}))
@@ -127,10 +128,13 @@ module clarkson
   end
 
   function updateWeight(Constraints::ModelConstraints, i::Int, mul::Float64 = 2.0)
-    Constraints.totalWeight += Constraints.weights[i]
-    #promote!(Constraints.buckets, Constraints.weights[i]+1, Constraints.weights[i]+2, [i])
-    #Constraints.weights[i] += 1
+    if isinf(Constraints.totalWeight + (mul - 1) * Constraints.weights[i]) || isinf(Constraints.weights[i] * mul)
+      println("Weight exceeds float64 and so not updated.")
+      return 0
+    end
+    Constraints.totalWeight += (mul - 1) * Constraints.weights[i]
     Constraints.weights[i] *= mul 
+    return 1
   end
 
   # addConstraints(constraints, R)
@@ -228,7 +232,7 @@ module clarkson
   function Clarkson(model::Model)
     # Initial setup stage:
     constraintTypes = list_of_constraint_types(model)
-    modelConstraints = ModelConstraints(model)
+    modelConstraints = @time ModelConstraints(model)
     n = length(all_variables(model))
     r = 6*n^2
     r = 2*n*trunc(Int64, log2(n)+1)
@@ -239,6 +243,7 @@ module clarkson
     timeToCheckConstraints = []
     timeToSample = []
     timeToAddConstraints = []
+    timeToUpdateWeights = []
     objValues = []
     while true
       # Sampling procedure:
@@ -304,12 +309,14 @@ module clarkson
         println("Time to check violation: ", timeToCheckConstraints)
         println("Time to sample: ", timeToSample)
         println("Time to add constraints: ", timeToAddConstraints)
+        println("Time to update weights: ", timeToUpdateWeights)
         println("Objective: ", objValues)
         println("Relative Objective: ", [abs(o - objective_value(newModel))/objective_value(newModel) for o in objValues])
         return objective_value(newModel), optimalPrimal
         # Note our totalWeight can always be bounded by m^2, since |H| <=
         # (1+1/(3n))^{n ln(m)} m ~ m^2
       elseif violated_weight < (2*n*modelConstraints.totalWeight)/r
+        startTime = time_ns()
         for v in V
           updateWeight(modelConstraints, v, 2.0)
         end
@@ -321,6 +328,8 @@ module clarkson
             end
           end
         end
+        endTime = time_ns()
+        push!(timeToUpdateWeights, (endTime - startTime)/1e9)
       else
         println("Not updated becuase too many constraints are violated.")
       end
