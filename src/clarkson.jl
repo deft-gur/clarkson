@@ -213,6 +213,20 @@ module clarkson
     endTime = time_ns()
     println("finish clearing: ", (endTime - startTime)/1e9)
 
+    #for c in all_constraints(model, VariableRef, MOI.LessThan{Float64})
+    #  delete(model, c)
+    #end
+    # Add number of edges cannot exceed n.
+    var = all_variables(model)
+    num_vert = 0
+    while(true)
+      num_vert += 1
+      if (num_vert * (num_vert-1)) == 2 * length(var)
+        break
+      end
+    end
+    @constraint(model, dot(ones(length(var)), var) <= num_vert + 1)
+
     set_optimizer(model, () -> Gurobi.Optimizer(Gurobi.Env()))
     #set_attribute(model, "Threads", Threads.nthreads())
     set_attribute(model, "InfUnbdInfo", 1)
