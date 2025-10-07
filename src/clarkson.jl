@@ -357,9 +357,12 @@ module clarkson
         end
         if y != nothing
           non_zero_indices = (objSense == MIN_SENSE) ? findall(y .< -EPS) : findall(y .> EPS)
-          top_five = first(sort([Pair(abs(y[i]/modelConstraints.rowNorm[R[i]]), i) for i in non_zero_indices], rev=true), 5)
-          for (_, i::Int) in top_five
-            updateWeight(modelConstraints, R[i], 5.0)
+          # = sort([Pair(abs(y[i]/modelConstraints.rowNorm[R[i]]), i) for i in non_zero_indices], rev=true)
+          denom = sum([ abs(y[i]) for i in non_zero_indices ])
+          #top_five = first(sort([Pair(abs(y[i]/modelConstraints.rowNorm[R[i]]), i) for i in non_zero_indices], rev=true), 5)
+          #for (_, i::Int) in top_five
+          for i::Int in non_zero_indices
+            updateWeight(modelConstraints, R[i], 1.0 + 5.0 * abs(y[i]/denom))
             #if (isAffConstraint(modelConstraints, R[i])) 
             #  println(y[i]/modelConstraints.rowNorm[R[i]])
             #  updateWeight(modelConstraints, R[i], 1+abs(y[i]/modelConstraints.rowNorm[R[i]]))
