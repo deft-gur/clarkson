@@ -3,6 +3,8 @@ module clarkson
   using JuMP, Gurobi
   using Random, WeightVectors
   using LinearAlgebra
+  using Dualization
+  using IterativeSolvers
 
   EPS = 1e-6
 
@@ -27,6 +29,7 @@ module clarkson
       Operators::Vector{Function}
       include_variable::Bool
       rowNorm::Vector{Float64}
+      b::Vector{Float64}
   end
 
   function isVariableConstraint(m::ModelConstraints, i::Int64)
@@ -88,6 +91,7 @@ module clarkson
       end
 
       A = data.A
+      b = [ (isinf(data.b_lower[i]) ? data.b_upper[i] : data.b_lower[i]) for i in 1:size(A, 1)]
       LHS = []
       RHS = []
       Operators = []
@@ -119,7 +123,8 @@ module clarkson
         RHS,
         Operators,
         include_variable,
-        rowNorm
+        rowNorm,
+        b
         )
   end
 
@@ -170,6 +175,17 @@ module clarkson
     end
   end
 
+  function setOptimizer(model::Model)
+    set_optimizer(model, () -> Gurobi.Optimizer(Gurobi.Env()))
+    #set_attribute(model, "Threads", Threads.nthreads())
+    set_attribute(model, "InfUnbdInfo", 1)
+    #set_attribute(model, "Presolve", 0)
+    #set_attribute(model, "DualReductions", 0)
+    #set_attribute(model, "Method", 0)
+    #write_to_file(model, "model-squared.mps")
+    #set_silent(model)
+  end
+
   function createNewSampledModel(modelConstraints::ModelConstraints, R::Vector{Int})
     clearConstraints(modelConstraints.model, modelConstraints.include_variable)
     addConstraints(modelConstraints, R)
@@ -181,15 +197,15 @@ module clarkson
     #  delete(model, c)
     #end
     # Add number of edges cannot exceed n.
-    var = all_variables(newModel)
-    num_vert = 0
-    while(true)
-      num_vert += 1
-      if (num_vert * (num_vert-1)) == 2 * length(var)
-        break
-      end
-    end
-    @constraint(newModel, dot(ones(length(var)), var) <= num_vert + 1)
+    #var = all_variables(newModel)
+    #num_vert = 0
+    #while(true)
+    #  num_vert += 1
+    #  if (num_vert * (num_vert-1)) == 2 * length(var)
+    #    break
+    #  end
+    #end
+    #@constraint(newModel, dot(ones(length(var)), var) <= num_vert + 1)
 
     return newModel, sampledConstraintRefs
   end
@@ -248,14 +264,19 @@ module clarkson
     println("finish clearing: ", (endTime - startTime)/1e9)
 
 
-    set_optimizer(model, () -> Gurobi.Optimizer(Gurobi.Env()))
-    #set_attribute(model, "Threads", Threads.nthreads())
-    set_attribute(model, "InfUnbdInfo", 1)
-    #set_attribute(model, "Presolve", 0)
-    #set_attribute(model, "DualReductions", 0)
-    #set_attribute(model, "Method", 0)
-    #write_to_file(model, "model-squared.mps")
-    #set_silent(model)
+    setOptimizer(model)
+  end
+
+  function myLsqr(A, b)
+    m, n = size(A)
+    k = size(b, 2)
+    X = zeros(n, k)
+    for i in 1:k
+      bi = b[:, i]
+      xi = lsmr(A, bi)
+      X[:, i] = xi
+    end
+    return X
   end
 
   # Clarkson(model)
@@ -291,8 +312,9 @@ module clarkson
       newModel, sampledConstraintRefs = createNewSampledModel(modelConstraints, R)
       endTime = time_ns()
       push!(timeToAddConstraints, (endTime - startTime)/1e9)
-      set_optimizer(newModel, () -> Gurobi.Optimizer(Gurobi.Env()))
-      set_attribute(newModel, "InfUnbdInfo", 1)
+      setOptimizer(newModel)
+      #set_optimizer(newModel, () -> Gurobi.Optimizer(Gurobi.Env()))
+      #set_attribute(newModel, "InfUnbdInfo", 1)
       # Solve base case.
       startTime = time_ns()
       optimize!(newModel)
@@ -309,7 +331,7 @@ module clarkson
         optimalPrimal = value(all_variables(newModel))
         #y = shadow_price.(all_constraints(newModel, include_variable_in_set_constraints=modelConstraints.include_variable))
         y = shadow_price.(sampledConstraintRefs)
-        #dual_reduced_cost = constraints.data.b_lower - constraints.data.A * x
+        dual_reduced_cost = modelConstraints.b - modelConstraints.data.A * optimalPrimal
         #dual_reduced_cost = constraints.data.b_upper - constraints.data.A * x
         push!(objValues, objective_value(newModel))
 
@@ -355,20 +377,56 @@ module clarkson
         for v in V
           updateWeight(modelConstraints, v, 2.0)
         end
-        if y != nothing
-          non_zero_indices = (objSense == MIN_SENSE) ? findall(y .< -EPS) : findall(y .> EPS)
-          # = sort([Pair(abs(y[i]/modelConstraints.rowNorm[R[i]]), i) for i in non_zero_indices], rev=true)
-          denom = sum([ abs(y[i]) for i in non_zero_indices ])
-          #top_five = first(sort([Pair(abs(y[i]/modelConstraints.rowNorm[R[i]]), i) for i in non_zero_indices], rev=true), 5)
-          #for (_, i::Int) in top_five
-          for i::Int in non_zero_indices
-            updateWeight(modelConstraints, R[i], 1.0 + 5.0 * abs(y[i]/denom))
-            #if (isAffConstraint(modelConstraints, R[i])) 
-            #  println(y[i]/modelConstraints.rowNorm[R[i]])
-            #  updateWeight(modelConstraints, R[i], 1+abs(y[i]/modelConstraints.rowNorm[R[i]]))
-            #end
+        if dual_reduced_cost != nothing
+          #dual_model, primal_dual_map = dualize(newModel)
+          #setOptimizer(dual_model)
+          #for (primal_con, dual_var) in primal_dual_map.primal_con_dual_var
+          #  set_start_value(dual_var, dual(primal_con))
+          #end
+          #for (primal_var, dual_con) in primal_dual_map.primal_var_dual_con
+          #  set_dual_start_value(dual_con, value(primal_var))
+          #end
+          #optimize!(dual_model)
+          candidate_indices = (objSense == MIN_SENSE) ? findall(dual_reduced_cost .> EPS) : findall(dual_reduced_cost .< EPS)
+          #statuses = get_attribute.(all_variables(newModel), MOI.VariableBasisStatus())
+          #statuses = get_attribute.(sampledConstraintRefs, MOI.ConstraintBasisStatus())
+          #basic_indices = findall(s -> s == MOI.BASIC, statuses)
+
+          basic_indices = findall(abs.(y) .> EPS)
+          ## Calculate d = A_B^(-T) A^T
+          A_B = modelConstraints.data.A[basic_indices, :]
+          #if (size(A_B, 1) < size(A_B, 2))
+          #  A_B = vcat(A_B, zeros(size(A_B, 2) - size(A_B, 1), size(A_B, 2)))
+          #end
+          #println(size(A_B))
+          #println(size(modelConstraints.data.A[candidate_indices, :]))
+          d = myLsqr(transpose(A_B), transpose(modelConstraints.data.A[candidate_indices, :]))
+          #d = Matrix(transpose(A_B))\Matrix(transpose(modelConstraints.data.A[candidate_indices, :]))
+          #rowNorm = vec(sqrt.(sum(abs2, modelConstraints.data.A[candidate_indices, :] * transpose(inv(A_B)), dims=2)))
+          #@time println(A_B' \ modelConstraints.data.A[candidate_indices, :]')
+          #@time println(modelConstraints.data.A[candidate_indices, :] * transpose(inv(Matrix(A_B))))
+          colNorm = vec(sqrt.(sum(abs2, d, dims=1)))
+          top = sort([Pair(abs(dual_reduced_cost[i]/colNorm[j]), i) for (j,i) in enumerate(candidate_indices)], rev=true)
+          top = first(top, trunc(Int64, length(top)/10))
+          #top_five = first(sort([Pair(abs(dual_reduced_cost[i]), i) for i in candidate_indices], rev=true), 40)
+          for (_, i::Int) in top
+            updateWeight(modelConstraints, i, 5.0)
           end
         end
+        #if y != nothing
+        #  non_zero_indices = (objSense == MIN_SENSE) ? findall(y .< -EPS) : findall(y .> EPS)
+        #  # = sort([Pair(abs(y[i]/modelConstraints.rowNorm[R[i]]), i) for i in non_zero_indices], rev=true)
+        #  denom = sum([ abs(y[i]) for i in non_zero_indices ])
+        #  #top_five = first(sort([Pair(abs(y[i]/modelConstraints.rowNorm[R[i]]), i) for i in non_zero_indices], rev=true), 5)
+        #  #for (_, i::Int) in top_five
+        #  for i::Int in non_zero_indices
+        #    updateWeight(modelConstraints, R[i], 1.0 + 5.0 * abs(y[i]/denom))
+        #    #if (isAffConstraint(modelConstraints, R[i])) 
+        #    #  println(y[i]/modelConstraints.rowNorm[R[i]])
+        #    #  updateWeight(modelConstraints, R[i], 1+abs(y[i]/modelConstraints.rowNorm[R[i]]))
+        #    #end
+        #  end
+        #end
         endTime = time_ns()
         push!(timeToUpdateWeights, (endTime - startTime)/1e9)
       else
