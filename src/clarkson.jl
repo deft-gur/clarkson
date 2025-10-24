@@ -40,12 +40,11 @@ module clarkson
     return (i <= m.numAffConstraints) && (i >= 1)
   end
 
-  function ModelConstraints(OrigModel::Model)
+  function ModelConstraints(OrigModel::Model, include_variable)
       # NOTE: We assume that all_constraints will return constraints
       # with the following priority:
       #   1. Affine constraint =, >=, <=
       #   2. Variable constraint =, >=, <=
-      include_variable = false
       model, ref_map = copy_model(OrigModel)
       constraints = @time constraint_object.(all_constraints(model; include_variable_in_set_constraints = include_variable))
       i = 1
@@ -285,10 +284,11 @@ module clarkson
   #
   # Output: Return an optimal value and primal solution to the LP.
   #
-  function Clarkson(model::Model)
+  function Clarkson(model::Model, alpha::Number=2, include_variable::Bool=true,
+                    topPercent::Float64=0.1, beta::Number=2)
     # Initial setup stage:
     constraintTypes = list_of_constraint_types(model)
-    modelConstraints = @time ModelConstraints(model)
+    modelConstraints = @time ModelConstraints(model, include_variable)
     n = length(all_variables(model))
     r = 6*n^2
     r = 2*n*trunc(Int64, log2(n)+1)
@@ -375,7 +375,7 @@ module clarkson
       elseif violated_weight < (2*n*modelConstraints.totalWeight)/r
         startTime = time_ns()
         for v in V
-          updateWeight(modelConstraints, v, 2.0)
+          updateWeight(modelConstraints, v, alpha)
         end
         if dual_reduced_cost != nothing
           #dual_model, primal_dual_map = dualize(newModel)
@@ -407,10 +407,10 @@ module clarkson
           #@time println(modelConstraints.data.A[candidate_indices, :] * transpose(inv(Matrix(A_B))))
           colNorm = vec(sqrt.(sum(abs2, d, dims=1)))
           top = sort([Pair(abs(dual_reduced_cost[i]/colNorm[j]), i) for (j,i) in enumerate(candidate_indices)], rev=true)
-          top = first(top, trunc(Int64, length(top)/10))
+          top = first(top, trunc(Int64, length(top) * topPercent))
           #top_five = first(sort([Pair(abs(dual_reduced_cost[i]), i) for i in candidate_indices], rev=true), 40)
           for (_, i::Int) in top
-            updateWeight(modelConstraints, i, 5.0)
+            updateWeight(modelConstraints, i, beta)
           end
         end
         #if y != nothing
