@@ -181,7 +181,6 @@ module clarkson
     #set_attribute(model, "Presolve", 0)
     #set_attribute(model, "DualReductions", 0)
     #set_attribute(model, "Method", 0)
-    #write_to_file(model, "model-squared.mps")
     #set_silent(model)
   end
 
@@ -323,6 +322,8 @@ module clarkson
       status = termination_status(newModel)
       optimalPrimal = nothing
       y = nothing
+      dual_reduced_cost = nothing
+      c_basis = nothing
       println(status)
       push!(optimalityIterates, status)
       if status == MOI.OPTIMAL
@@ -377,7 +378,7 @@ module clarkson
         for v in V
           updateWeight(modelConstraints, v, alpha)
         end
-        if dual_reduced_cost != nothing
+        if c_basis != nothing
           #dual_model, primal_dual_map = dualize(newModel)
           #setOptimizer(dual_model)
           #for (primal_con, dual_var) in primal_dual_map.primal_con_dual_var
@@ -392,7 +393,12 @@ module clarkson
           #statuses = get_attribute.(sampledConstraintRefs, MOI.ConstraintBasisStatus())
           #basic_indices = findall(s -> s == MOI.BASIC, statuses)
 
-          basic_indices = findall(abs.(y) .> EPS)
+          grb_backend = backend(newModel)
+          all_cons = all_constraints(model; include_variable_in_set_constraints = false)
+          c_basis = [MOI.get(grb_backend, Gurobi.ConstraintAttribute("CBasis"), index(ci)) for ci in all_cons]
+
+          #basic_indices = findall(abs.(y) .> EPS)
+          basic_indices = R[c_basis]
           ## Calculate d = A_B^(-T) A^T
           A_B = modelConstraints.data.A[basic_indices, :]
           #if (size(A_B, 1) < size(A_B, 2))
