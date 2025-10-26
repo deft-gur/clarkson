@@ -22,11 +22,11 @@ function parse_commandline()
           action = :store_true
       "--alpha", "-a"
           help = "Multiplicative factor for violation."
-          arg_type = Number
+          arg_type = Float64
           default = 2.0
       "--beta", "-b"
           help = "Multiplicative factor for steepest edge rule."
-          arg_type = Number
+          arg_type = Float64
           default = 2.0
       "--top", "-t"
           help = "Top percentage steepest edge rule considers to update."
@@ -73,7 +73,6 @@ function bench_main()::Cint
   beta = parsed_args["beta"]
   top = parsed_args["top"]
   include_variable = parsed_args["include-variable"]
-  println("use_gurobi:", use_gurobi)
 
   if (use_gurobi)
     benchmark_gurobi(input_file)
