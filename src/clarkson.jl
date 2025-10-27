@@ -247,8 +247,9 @@ module clarkson
   end
 
   function sample(model::ModelConstraints, r::Int64)
-    ret = rand(model.rng, model.weights, r)
-    return sort(unique(ret))
+    ret = sort(unique(rand(model.rng, model.weights, r)))
+    println("Percent of unique sampled constraints: ", length(ret)/r)
+    return ret
   end
 
   function clearConstraints(model::Model, include_variable::Bool)
