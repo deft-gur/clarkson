@@ -50,6 +50,7 @@ module clarkson
       i = 1
       m = length(constraints)
       data = @time lp_matrix_data(model)
+      # TODO: Right now we only support =, <=, >=, but not of type # MOI.Interval{float64}.
       numAffEqualTo = length(all_constraints(model, AffExpr, MOI.EqualTo{Float64}))
       numAffLessThan = length(all_constraints(model, AffExpr, MOI.LessThan{Float64}))
       numAffGreaterThan = length(all_constraints(model, AffExpr, MOI.GreaterThan{Float64}))
@@ -335,6 +336,9 @@ module clarkson
         y = shadow_price.(sampledConstraintRefs)
         dual_reduced_cost = modelConstraints.b - modelConstraints.data.A * optimalPrimal
         #dual_reduced_cost = constraints.data.b_upper - constraints.data.A * x
+        grb_backend = backend(newModel)
+        all_cons = all_constraints(newModel; include_variable_in_set_constraints = false)
+        c_basis = [i for i in 1:length(all_cons) if MOI.get(grb_backend, Gurobi.ConstraintAttribute("CBasis"), index(all_cons[i])) != 0 ]
         push!(objValues, objective_value(newModel))
 
       elseif status == MOI.DUAL_INFEASIBLE && primal_status(newModel) == MOI.INFEASIBILITY_CERTIFICATE
@@ -394,11 +398,9 @@ module clarkson
           #statuses = get_attribute.(sampledConstraintRefs, MOI.ConstraintBasisStatus())
           #basic_indices = findall(s -> s == MOI.BASIC, statuses)
 
-          grb_backend = backend(newModel)
-          all_cons = all_constraints(model; include_variable_in_set_constraints = false)
-          c_basis = [MOI.get(grb_backend, Gurobi.ConstraintAttribute("CBasis"), index(ci)) for ci in all_cons]
 
           #basic_indices = findall(abs.(y) .> EPS)
+          println(c_basis)
           basic_indices = R[c_basis]
           ## Calculate d = A_B^(-T) A^T
           A_B = modelConstraints.data.A[basic_indices, :]
@@ -412,6 +414,9 @@ module clarkson
           #rowNorm = vec(sqrt.(sum(abs2, modelConstraints.data.A[candidate_indices, :] * transpose(inv(A_B)), dims=2)))
           #@time println(A_B' \ modelConstraints.data.A[candidate_indices, :]')
           #@time println(modelConstraints.data.A[candidate_indices, :] * transpose(inv(Matrix(A_B))))
+          #
+          # b^T - b_B^T (A_B)^-T A^T
+          #dual_reduced_cost = modelConstraints.b - transpose(d) * modelConstraints.b[c_basis]
           colNorm = vec(sqrt.(sum(abs2, d, dims=1)))
           top = sort([Pair(abs(dual_reduced_cost[i]/colNorm[j]), i) for (j,i) in enumerate(candidate_indices)], rev=true)
           top = first(top, trunc(Int64, length(top) * topPercent))
