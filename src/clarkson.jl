@@ -5,6 +5,7 @@ module clarkson
   using LinearAlgebra
   using Dualization
   using IterativeSolvers
+  using SparseArrays
 
   EPS = 1e-6
 
@@ -210,6 +211,14 @@ module clarkson
   end
 
   function violatedConstraints(constraints::ModelConstraints, point::Vector{Float64})
+
+    totalW = 0
+    for i in 1:length(constraints.weights)
+      totalW += constraints.weights[i]
+    end
+    if (abs(totalW - constraints.totalWeight) > 1e-6)
+      println("ERROR: totalWeight is not calculated correctly.")
+    end
     violated = []
     is_feasible = false
     violated_weight = 0
@@ -224,7 +233,7 @@ module clarkson
     # =, >=, <=
     violationConstrVector = LHSData .>= (constraints.data.b_lower - EPS * ones(m))
     violationConstrVector = violationConstrVector .& (LHSData .<= (constraints.data.b_upper + EPS * ones(m)))
-        violatedVarVector = point .>= constraints.data.x_lower - EPS*ones(n)
+    violatedVarVector = point .>= constraints.data.x_lower - EPS*ones(n)
     violatedVarVector = violatedVarVector .& (point .<= constraints.data.x_upper + EPS*ones(n))
     startTime = time_ns()
     for i in 1:m
@@ -279,6 +288,45 @@ module clarkson
     return X
   end
 
+  # Input: model containing a LP.
+  #
+  # Post: Transform the LP into the form of min c^T x, A x >= b
+  #
+  # Output: None
+  #
+  function transform_model!(model::Model)
+    variable_lower = all_constraints(model, VariableRef, MOI.GreaterThan{Float64})
+    variable_upper = all_constraints(model, VariableRef, MOI.LessThan{Float64})
+    variable_equal = all_constraints(model, VariableRef, MOI.EqualTo{Float64})
+    #aff_lower = all_constraints(model, AffExpr, MOI.GreaterThan{Float64})
+    aff_upper = all_constraints(model, AffExpr, MOI.LessThan{Float64})
+    aff_equal = all_constraints(model, AffExpr, MOI.LessThan{Float64})
+
+    for con_ref in variable_lower
+      co = constraint_object(con_ref)
+      @constraint(model, co.func >= co.set.lower)
+      delete(model, con_ref)
+    end
+
+    for con_ref in vcat(variable_upper, aff_upper)
+      co = constraint_object(con_ref)
+      @constraint(model, -co.func >= -co.set.upper)
+      delete(model, con_ref)
+    end
+
+    for con_ref in vcat(variable_equal, aff_equal)
+      co = constraint_object(con_ref)
+      @constraint(model, co.func >= co.set.upper)
+      @constraint(model, -co.func >= -co.set.upper)
+      delete(model, con_ref)
+    end
+
+    if (objective_sense(model) == MAX_SENSE)
+      @objective(m, Min, -objective_function(m))
+    end
+
+  end
+
   # Clarkson(model)
   #
   # Input: model containing the LP.
@@ -288,6 +336,7 @@ module clarkson
   function Clarkson(model::Model, alpha::Number=2, include_variable::Bool=true,
                     topPercent::Float64=0.1, beta::Number=2)
     # Initial setup stage:
+    transform_model!(model)
     constraintTypes = list_of_constraint_types(model)
     modelConstraints = @time ModelConstraints(model, include_variable)
     n = length(all_variables(model))
@@ -339,6 +388,11 @@ module clarkson
         grb_backend = backend(newModel)
         all_cons = all_constraints(newModel; include_variable_in_set_constraints = false)
         c_basis = [i for i in 1:length(all_cons) if MOI.get(grb_backend, Gurobi.ConstraintAttribute("CBasis"), index(all_cons[i])) != 0 ]
+        println("len(c_basis)", length(c_basis))
+        println("len(var)", size(modelConstraints.data.A)[2])
+        if (length(c_basis) != size(modelConstraints.data.A)[2])
+          println("-----They are not equal!!!!!-----")
+        end
         push!(objValues, objective_value(newModel))
 
       elseif status == MOI.DUAL_INFEASIBLE && primal_status(newModel) == MOI.INFEASIBILITY_CERTIFICATE
@@ -375,6 +429,7 @@ module clarkson
         println("Time to update weights: ", timeToUpdateWeights)
         println("Objective: ", objValues)
         println("Relative Objective: ", [abs(o - objective_value(newModel))/objective_value(newModel) for o in objValues])
+        println("Total iterations:", length(numOfViolatedIterates))
         return objective_value(newModel), optimalPrimal
         # Note our totalWeight can always be bounded by m^2, since |H| <=
         # (1+1/(3n))^{n ln(m)} m ~ m^2
@@ -400,7 +455,6 @@ module clarkson
 
 
           #basic_indices = findall(abs.(y) .> EPS)
-          println(c_basis)
           basic_indices = R[c_basis]
           ## Calculate d = A_B^(-T) A^T
           A_B = modelConstraints.data.A[basic_indices, :]
@@ -409,17 +463,27 @@ module clarkson
           #end
           #println(size(A_B))
           #println(size(modelConstraints.data.A[candidate_indices, :]))
-          d = myLsqr(transpose(A_B), transpose(modelConstraints.data.A[candidate_indices, :]))
+          #d = myLsqr(transpose(A_B), transpose(modelConstraints.data.A[candidate_indices, :]))
+          
+          #QR = qr(transpose(A_B))
+          #Q = QR.Q
+          #R = QR.R
+          #d = inv(R) * transpose(Q) * transpose(modelConstraints.data.A[candidate_indices, :])
+          LU = lu(sparse(transpose(A_B)))
+          #d = LU \ Matrix(transpose(modelConstraints.data.A[candidate_indices, :]))
+          d = LU \ Matrix(transpose(modelConstraints.data.A[candidate_indices, :]))
+
+          
           #d = Matrix(transpose(A_B))\Matrix(transpose(modelConstraints.data.A[candidate_indices, :]))
           #rowNorm = vec(sqrt.(sum(abs2, modelConstraints.data.A[candidate_indices, :] * transpose(inv(A_B)), dims=2)))
           #@time println(A_B' \ modelConstraints.data.A[candidate_indices, :]')
           #@time println(modelConstraints.data.A[candidate_indices, :] * transpose(inv(Matrix(A_B))))
           #
           # b^T - b_B^T (A_B)^-T A^T
-          #dual_reduced_cost = modelConstraints.b - transpose(d) * modelConstraints.b[c_basis]
           colNorm = vec(sqrt.(sum(abs2, d, dims=1)))
           top = sort([Pair(abs(dual_reduced_cost[i]/colNorm[j]), i) for (j,i) in enumerate(candidate_indices)], rev=true)
           top = first(top, trunc(Int64, length(top) * topPercent))
+          println("Updating:", length(top))
           #top_five = first(sort([Pair(abs(dual_reduced_cost[i]), i) for i in candidate_indices], rev=true), 40)
           for (_, i::Int) in top
             updateWeight(modelConstraints, i, beta)
