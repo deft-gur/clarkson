@@ -300,7 +300,7 @@ module clarkson
     variable_equal = all_constraints(model, VariableRef, MOI.EqualTo{Float64})
     #aff_lower = all_constraints(model, AffExpr, MOI.GreaterThan{Float64})
     aff_upper = all_constraints(model, AffExpr, MOI.LessThan{Float64})
-    aff_equal = all_constraints(model, AffExpr, MOI.LessThan{Float64})
+    aff_equal = all_constraints(model, AffExpr, MOI.EqualTo{Float64})
 
     for con_ref in variable_lower
       co = constraint_object(con_ref)
@@ -316,8 +316,8 @@ module clarkson
 
     for con_ref in vcat(variable_equal, aff_equal)
       co = constraint_object(con_ref)
-      @constraint(model, co.func >= co.set.upper)
-      @constraint(model, -co.func >= -co.set.upper)
+      @constraint(model, co.func >= co.set.value)
+      @constraint(model, -co.func >= -co.set.value)
       delete(model, con_ref)
     end
 
@@ -435,8 +435,10 @@ module clarkson
         # (1+1/(3n))^{n ln(m)} m ~ m^2
       elseif violated_weight < (2*n*modelConstraints.totalWeight)/r
         startTime = time_ns()
-        for v in V
-          updateWeight(modelConstraints, v, alpha)
+        if c_basis == nothing
+          for v in V
+            updateWeight(modelConstraints, v, alpha)
+          end
         end
         if c_basis != nothing
           #dual_model, primal_dual_map = dualize(newModel)
@@ -449,6 +451,7 @@ module clarkson
           #end
           #optimize!(dual_model)
           candidate_indices = (objSense == MIN_SENSE) ? findall(dual_reduced_cost .> EPS) : findall(dual_reduced_cost .< EPS)
+          #candidate_indices = (objSense == MAX_SENSE) ? findall(dual_reduced_cost .> EPS) : findall(dual_reduced_cost .< EPS)
           #statuses = get_attribute.(all_variables(newModel), MOI.VariableBasisStatus())
           #statuses = get_attribute.(sampledConstraintRefs, MOI.ConstraintBasisStatus())
           #basic_indices = findall(s -> s == MOI.BASIC, statuses)
@@ -482,8 +485,10 @@ module clarkson
           # b^T - b_B^T (A_B)^-T A^T
           colNorm = vec(sqrt.(sum(abs2, d, dims=1)))
           top = sort([Pair(abs(dual_reduced_cost[i]/colNorm[j]), i) for (j,i) in enumerate(candidate_indices)], rev=true)
-          top = first(top, trunc(Int64, length(top) * topPercent))
+          #top = sort([Pair(abs(dual_reduced_cost[i]/colNorm[j]), i) for (j,i) in enumerate(candidate_indices)], rev=false)
+          top = first(top, max(trunc(Int64, length(top) * topPercent), 10))
           println("Updating:", length(top))
+          println("top:", top)
           #top_five = first(sort([Pair(abs(dual_reduced_cost[i]), i) for i in candidate_indices], rev=true), 40)
           for (_, i::Int) in top
             updateWeight(modelConstraints, i, beta)
