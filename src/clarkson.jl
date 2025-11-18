@@ -44,12 +44,11 @@ module clarkson
     return (i <= m.numAffConstraints) && (i >= 1)
   end
 
-  function ModelConstraints(OrigModel::Model, include_variable)
+  function ModelConstraints(model::Model, include_variable)
       # NOTE: We assume that all_constraints will return constraints
       # with the following priority:
       #   1. Affine constraint =, >=, <=
       #   2. Variable constraint =, >=, <=
-      model, ref_map = copy_model(OrigModel)
       constraints = constraint_object.(all_constraints(model; include_variable_in_set_constraints = include_variable))
       i = 1
       m = length(constraints)
@@ -168,13 +167,18 @@ module clarkson
   #
   # Output: None
   #
-  function addConstraints(modelConstraints::ModelConstraints,
-      R::Vector{Int})
+  function addConstraints(modelConstraints::ModelConstraints, R::Vector{Int})
     #affRIdx = searchsortedfirst(R, constraints.numAffConstraints, lt=<=)
     #if (constraints.numAffEqualTo != 0)
     #  @constraint(model, )
     #end
     for c in modelConstraints.constraints[R]
+      add_constraint(modelConstraints.model, c)
+    end
+  end
+
+  function addConstraints(modelConstraints::ModelConstraints, R)
+    for c in R
       add_constraint(modelConstraints.model, c)
     end
   end
@@ -194,7 +198,6 @@ module clarkson
     addConstraints(modelConstraints, R)
     newModel, _ = copy_model(modelConstraints.model)
     sampledConstraintRefs = all_constraints(newModel, include_variable_in_set_constraints = modelConstraints.include_variable)
-    #clearConstraints(modelConstraints.model, modelConstraints.include_variable)
 
     #for c in all_constraints(model, VariableRef, MOI.LessThan{Float64})
     #  delete(model, c)
@@ -223,7 +226,7 @@ module clarkson
       println("ERROR: totalWeight is not calculated correctly.")
     end
     violated = []
-    is_feasible = false
+    is_feasible = true
     violated_weight = 0
     m = constraints.numAffConstraints
     n = length(point)
@@ -259,9 +262,10 @@ module clarkson
     return is_feasible, violated, violated_weight
   end
 
-  function sample(model::ModelConstraints, r::Int64)
+  function sample(model::ModelConstraints, r::Int64, include_index::Vector{Int64} = Vector{Int64}(undef, 0))
     ret = sort(unique(rand(model.rng, model.weights, r)))
     println("Percent of unique sampled constraints: ", length(ret)/r)
+    ret = unique(vcat(ret, include_index))
     return ret
   end
 
@@ -274,7 +278,6 @@ module clarkson
     end
     endTime = time_ns()
     println("finish clearing: ", (endTime - startTime)/1e9)
-
 
     setOptimizer(model)
   end
@@ -328,6 +331,13 @@ module clarkson
       @objective(m, Min, -objective_function(m))
     end
 
+    bounded_box_constraint = []
+    # Put a bounded box.
+    for var in all_variables(model)
+      push!(bounded_box_constraint, @constraint(model, -var >= -1e6))
+      push!(bounded_box_constraint, @constraint(model, var >= -1e6))
+    end
+    return [ i.value for i in index.(bounded_box_constraint) ]
   end
 
   # Clarkson(model)
@@ -336,10 +346,10 @@ module clarkson
   #
   # Output: Return an optimal value and primal solution to the LP.
   #
-  function Clarkson(model::Model, alpha::Number=2, include_variable::Bool=true,
+  function Clarkson(model::Model, alpha::Number=2, include_variable::Bool=false,
                     topPercent::Float64=0.1, beta::Number=2)
     # Initial setup stage:
-    transform_model!(model)
+    bounded_box_constraint_index = transform_model!(model)
     constraintTypes = list_of_constraint_types(model)
     modelConstraints = @time ModelConstraints(model, include_variable)
     n = length(all_variables(model))
@@ -358,7 +368,7 @@ module clarkson
     while true
       # Sampling procedure:
       startTime = time_ns()
-      R = @timeit to "sample()" sample(modelConstraints, r)
+      R = @timeit to "sample()" sample(modelConstraints, r, bounded_box_constraint_index)
       endTime = time_ns()
       push!(timeToSample, (endTime - startTime)/1e9)
       startTime = time_ns()
@@ -458,6 +468,10 @@ module clarkson
           #end
           #optimize!(dual_model)
           candidate_indices = (objSense == MIN_SENSE) ? findall(dual_reduced_cost .> EPS) : findall(dual_reduced_cost .< EPS)
+          if sort(V) != sort(candidate_indices)
+            println("------NOT EQUAL!!!!----")
+            exit(1)
+          end
           #candidate_indices = (objSense == MAX_SENSE) ? findall(dual_reduced_cost .> EPS) : findall(dual_reduced_cost .< EPS)
           #statuses = get_attribute.(all_variables(newModel), MOI.VariableBasisStatus())
           #statuses = get_attribute.(sampledConstraintRefs, MOI.ConstraintBasisStatus())
@@ -494,8 +508,6 @@ module clarkson
           top = sort([Pair(abs(dual_reduced_cost[i]/colNorm[j]), i) for (j,i) in enumerate(candidate_indices)], rev=true)
           #top = sort([Pair(abs(dual_reduced_cost[i]/colNorm[j]), i) for (j,i) in enumerate(candidate_indices)], rev=false)
           top = first(top, max(trunc(Int64, length(top) * topPercent), 10))
-          println("Updating:", length(top))
-          println("top:", top)
           #top_five = first(sort([Pair(abs(dual_reduced_cost[i]), i) for i in candidate_indices], rev=true), 40)
           for (_, i::Int) in top
             updateWeight(modelConstraints, i, beta)

@@ -42,7 +42,7 @@ end
 
 
 function benchmark_clarkson(filename::String, alpha::Number=2,
-                            include_variable::Bool=true,
+                            include_variable::Bool=false,
                             topPercent::Float64=0.1, beta::Number=2)
   model = @time read_from_file(filename)
   obj, sol = @time Clarkson(model, alpha, include_variable, topPercent, beta)
