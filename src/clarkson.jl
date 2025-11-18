@@ -6,8 +6,11 @@ module clarkson
   using Dualization
   using IterativeSolvers
   using SparseArrays
+  using TimerOutputs
 
   EPS = 1e-6
+
+  const to = TimerOutput()
 
   mutable struct ModelConstraints
       constraints::Vector{ScalarConstraint}
@@ -47,10 +50,10 @@ module clarkson
       #   1. Affine constraint =, >=, <=
       #   2. Variable constraint =, >=, <=
       model, ref_map = copy_model(OrigModel)
-      constraints = @time constraint_object.(all_constraints(model; include_variable_in_set_constraints = include_variable))
+      constraints = constraint_object.(all_constraints(model; include_variable_in_set_constraints = include_variable))
       i = 1
       m = length(constraints)
-      data = @time lp_matrix_data(model)
+      data = lp_matrix_data(model)
       # TODO: Right now we only support =, <=, >=, but not of type # MOI.Interval{float64}.
       numAffEqualTo = length(all_constraints(model, AffExpr, MOI.EqualTo{Float64}))
       numAffLessThan = length(all_constraints(model, AffExpr, MOI.LessThan{Float64}))
@@ -355,11 +358,11 @@ module clarkson
     while true
       # Sampling procedure:
       startTime = time_ns()
-      R = sample(modelConstraints, r)
+      R = @timeit to "sample()" sample(modelConstraints, r)
       endTime = time_ns()
       push!(timeToSample, (endTime - startTime)/1e9)
       startTime = time_ns()
-      newModel, sampledConstraintRefs = createNewSampledModel(modelConstraints, R)
+      newModel, sampledConstraintRefs = @timeit to "createNewSampledModel()" createNewSampledModel(modelConstraints, R)
       endTime = time_ns()
       push!(timeToAddConstraints, (endTime - startTime)/1e9)
       setOptimizer(newModel)
@@ -367,7 +370,7 @@ module clarkson
       #set_attribute(newModel, "InfUnbdInfo", 1)
       # Solve base case.
       startTime = time_ns()
-      optimize!(newModel)
+      @timeit to "optimize!" optimize!(newModel)
       endTime = time_ns()
       push!(timeToOptimize, (endTime - startTime)/1e9)
       status = termination_status(newModel)
@@ -411,7 +414,7 @@ module clarkson
       end
       # Check violated constraints
       startTime = time_ns()
-      is_feasible, V, violated_weight = violatedConstraints(modelConstraints, optimalPrimal)
+      is_feasible, V, violated_weight = @timeit to "violatedConstraints()" violatedConstraints(modelConstraints, optimalPrimal)
       endTime = time_ns()
       push!(timeToCheckConstraints, (endTime - startTime)/1e9)
       println("There are: ", length(V), " constraints violated.")
@@ -430,17 +433,21 @@ module clarkson
         println("Objective: ", objValues)
         println("Relative Objective: ", [abs(o - objective_value(newModel))/objective_value(newModel) for o in objValues])
         println("Total iterations:", length(numOfViolatedIterates))
+        show(to)
         return objective_value(newModel), optimalPrimal
         # Note our totalWeight can always be bounded by m^2, since |H| <=
         # (1+1/(3n))^{n ln(m)} m ~ m^2
       elseif violated_weight < (2*n*modelConstraints.totalWeight)/r
         startTime = time_ns()
         if c_basis == nothing
+          @timeit to "update weight on violated constraint" begin
           for v in V
             updateWeight(modelConstraints, v, alpha)
           end
+          end #@timeit to "update weight on violated constraint" begin
         end
         if c_basis != nothing
+          @timeit to "steepest edge rule" begin
           #dual_model, primal_dual_map = dualize(newModel)
           #setOptimizer(dual_model)
           #for (primal_con, dual_var) in primal_dual_map.primal_con_dual_var
@@ -493,6 +500,7 @@ module clarkson
           for (_, i::Int) in top
             updateWeight(modelConstraints, i, beta)
           end
+          end # @timeit to "steepest edge rule"
         end
         #if y != nothing
         #  non_zero_indices = (objSense == MIN_SENSE) ? findall(y .< -EPS) : findall(y .> EPS)
