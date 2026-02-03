@@ -48,14 +48,14 @@ module clarkson
   end
 
   function ModelConstraints(model::Model, include_variable)
-      # NOTE: We assume that all_constraints will return constraints
-      # with the following priority:
-      #   1. Affine constraint =, >=, <=
-      #   2. Variable constraint =, >=, <=
-      constraints = constraint_object.(all_constraints(model; include_variable_in_set_constraints = include_variable))
-      i = 1
-      m = length(constraints)
+      # Use lp_matrix_data ordering for consistency between constraint indexing and matrix A
       data = lp_matrix_data(model)
+      # Get constraint objects in the same order as rows in data.A
+      constraints = constraint_object.(data.affine_constraints)
+      i = 1
+      # Use size of matrix A for constraint count to ensure consistency
+      numAffConstraints = size(data.A, 1)
+      m = numAffConstraints
       # TODO: Right now we only support =, <=, >=, but not of type # MOI.Interval{float64}.
       numAffEqualTo = length(all_constraints(model, AffExpr, MOI.EqualTo{Float64}))
       numAffLessThan = length(all_constraints(model, AffExpr, MOI.LessThan{Float64}))
@@ -68,7 +68,6 @@ module clarkson
       numVarGreaterThan = length(all_constraints(model, VariableRef, MOI.GreaterThan{Float64}))
 
       numVarConstraints = numVarEqualTo + numVarLessThan + numVarGreaterThan
-      numAffConstraints = numAffEqualTo + numAffLessThan + numAffGreaterThan
 
       function getValue(set)
         if isa(set, MOI.LessThan{Float64})
