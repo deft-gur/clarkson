@@ -191,6 +191,7 @@ module clarkson
     set_optimizer(model, () -> Gurobi.Optimizer(Gurobi.Env()))
     #set_attribute(model, "Threads", Threads.nthreads())
     set_attribute(model, "InfUnbdInfo", 1)
+    set_attribute(model, "FeasibilityTol", EPS)  # Match our violation check tolerance
     #set_attribute(model, "Presolve", 0)
     #set_attribute(model, "DualReductions", 0)
     #set_attribute(model, "Method", 0)
