@@ -435,6 +435,7 @@ module clarkson
     warmVBasis::Union{Nothing, Vector{Int}} = nothing
     warmCBasis::Union{Nothing, Dict{Int, Int}} = nothing
     warmConstr::Union{Nothing, Vector{Int}} = nothing
+    warmStart = false
 
     numOfViolatedIterates = []
     optimalityIterates = []
@@ -584,10 +585,19 @@ module clarkson
       else
         println("Not updated becuase too many constraints are violated.")
       end
-      if length(V) <= r
+      # Switch to n^2 sampling if any of these conditions is met:
+      # 1. Few violations (absolute): length(V) <= n
+      # 2. Few violations (relative): < 0.1% of constraints violated
+      # 3. Iteration fallback: after 15 iterations
+      should_switch_to_n2 = length(V) <= n ||
+                            length(V) / modelConstraints.numConstraints < 0.001 ||
+                            numIt >= 15
+      if should_switch_to_n2 && r < 6*n^2
+        println("Switching to n^2 sampling (iter=$numIt, violations=$(length(V)), frac=$(length(V)/modelConstraints.numConstraints))")
         r = 6*n^2
+        warmStart = true
       end
-      if status == MOI.OPTIMAL && length(V) <= n
+      if status == MOI.OPTIMAL && warmStart
         # Extract basis for warm starting future iterations
         grb = backend(newModel)
         warmVBasis = [MOI.get(grb, Gurobi.VariableAttribute("VBasis"), index(v)) for v in all_variables(newModel)]
