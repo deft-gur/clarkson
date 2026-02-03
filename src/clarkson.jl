@@ -1,5 +1,6 @@
 module clarkson
   using DataStructures
+  import MathOptInterface as MOI
   using JuMP, Gurobi
   using Random, WeightVectors
   using LinearAlgebra
@@ -7,8 +8,9 @@ module clarkson
   using IterativeSolvers
   using SparseArrays
   using TimerOutputs
+  include(joinpath(@__DIR__, "PowerBucket.jl"))
 
-  EPS = 1e-6
+  EPS = 1e-8
 
   const to = TimerOutput()
 
@@ -17,6 +19,7 @@ module clarkson
       numConstraints::Int64
       weights::WeightVectors.AbstractWeightVector
       totalWeight::Float64
+      PB::PowerBucket
       rng::AbstractRNG
       data::LPMatrixData{Float64}
       numAffConstraints::Int64
@@ -111,6 +114,7 @@ module clarkson
         length(constraints),
         FixedSizeWeightVector(ones(Float64, m)),
         m,
+        PowerBucket(ones(Float64, m)),
         Xoshiro(42),
         data, 
         numAffConstraints,
@@ -153,6 +157,7 @@ module clarkson
     end
     Constraints.totalWeight += (mul - 1) * Constraints.weights[i]
     Constraints.weights[i] *= mul 
+    update!(Constraints.PB, i, Constraints.weights[i])
     return 1
   end
 
@@ -196,7 +201,7 @@ module clarkson
   function createNewSampledModel(modelConstraints::ModelConstraints, R::Vector{Int})
     clearConstraints(modelConstraints.model, modelConstraints.include_variable)
     addConstraints(modelConstraints, R)
-    newModel, _ = copy_model(modelConstraints.model)
+    newModel, newModelMap = copy_model(modelConstraints.model)
     sampledConstraintRefs = all_constraints(newModel, include_variable_in_set_constraints = modelConstraints.include_variable)
 
     #for c in all_constraints(model, VariableRef, MOI.LessThan{Float64})
@@ -213,7 +218,7 @@ module clarkson
     #end
     #@constraint(newModel, dot(ones(length(var)), var) <= num_vert + 1)
 
-    return newModel, sampledConstraintRefs
+    return newModel, sampledConstraintRefs, newModelMap
   end
 
   function violatedConstraints(constraints::ModelConstraints, point::Vector{Float64})
@@ -225,7 +230,7 @@ module clarkson
     if (abs(totalW - constraints.totalWeight) > 1e-6)
       println("ERROR: totalWeight is not calculated correctly.")
     end
-    violated = []
+    violated = Int[]
     is_feasible = true
     violated_weight = 0
     m = constraints.numAffConstraints
@@ -304,9 +309,11 @@ module clarkson
     variable_lower = all_constraints(model, VariableRef, MOI.GreaterThan{Float64})
     variable_upper = all_constraints(model, VariableRef, MOI.LessThan{Float64})
     variable_equal = all_constraints(model, VariableRef, MOI.EqualTo{Float64})
+    variable_int = all_constraints(model, VariableRef, MOI.Interval{Float64})
     #aff_lower = all_constraints(model, AffExpr, MOI.GreaterThan{Float64})
     aff_upper = all_constraints(model, AffExpr, MOI.LessThan{Float64})
     aff_equal = all_constraints(model, AffExpr, MOI.EqualTo{Float64})
+    aff_int = all_constraints(model, AffExpr, MOI.Interval{Float64})
 
     for con_ref in variable_lower
       co = constraint_object(con_ref)
@@ -324,6 +331,13 @@ module clarkson
       co = constraint_object(con_ref)
       @constraint(model, co.func >= co.set.value)
       @constraint(model, -co.func >= -co.set.value)
+      delete(model, con_ref)
+    end
+
+    for con_ref in vcat(variable_int, aff_int)
+      co = constraint_object(con_ref)
+      @constraint(model, co.func >= co.set.lower)
+      @constraint(model, -co.func >= -co.set.upper)
       delete(model, con_ref)
     end
 
@@ -350,12 +364,16 @@ module clarkson
                     topPercent::Float64=0.1, beta::Number=2)
     # Initial setup stage:
     bounded_box_constraint_index = transform_model!(model)
+    #bounded_box_constraint_index = []
     constraintTypes = list_of_constraint_types(model)
     modelConstraints = @time ModelConstraints(model, include_variable)
     n = length(all_variables(model))
     r = 6*n^2
     r = 2*n*trunc(Int64, log2(n)+1)
     objSense = objective_sense(model)
+    warmVBasis::Union{Nothing, Vector{Int}} = nothing
+    warmCBasis::Union{Nothing, Dict{Int, Int}} = nothing
+    warmConstr::Union{Nothing, Vector{Int}} = nothing
 
     numOfViolatedIterates = []
     optimalityIterates = []
@@ -365,14 +383,21 @@ module clarkson
     timeToAddConstraints = []
     timeToUpdateWeights = []
     objValues = []
+    numIt = 0
     while true
+      numIt += 1
       # Sampling procedure:
       startTime = time_ns()
-      R = @timeit to "sample()" sample(modelConstraints, r, bounded_box_constraint_index)
+      #R = @timeit to "sample()" sample(modelConstraints, r, bounded_box_constraint_index)
+      R = @timeit to "sample()" sample(modelConstraints, r)
+      if warmVBasis !== nothing
+          R = sort(unique(vcat(R, warmConstr)))
+      end
       endTime = time_ns()
       push!(timeToSample, (endTime - startTime)/1e9)
       startTime = time_ns()
-      newModel, sampledConstraintRefs = @timeit to "createNewSampledModel()" createNewSampledModel(modelConstraints, R)
+      newModel, sampledConstraintRefs, newModelMap = @timeit to "createNewSampledModel()" createNewSampledModel(modelConstraints, R)
+
       endTime = time_ns()
       push!(timeToAddConstraints, (endTime - startTime)/1e9)
       setOptimizer(newModel)
@@ -380,6 +405,26 @@ module clarkson
       #set_attribute(newModel, "InfUnbdInfo", 1)
       # Solve base case.
       startTime = time_ns()
+      if warmVBasis !== nothing
+          println("Setting warm start basis.")
+          grb = backend(newModel)
+          # Set VBasis on all variables
+          for (j, var) in enumerate(all_variables(newModel))
+              MOI.set(grb, Gurobi.VariableAttribute("VBasis"), index(var), warmVBasis[j])
+          end
+          # Set CBasis on all constraints
+          all_cons_ws = all_constraints(newModel; include_variable_in_set_constraints = false)
+          for (j, con) in enumerate(all_cons_ws)
+              if haskey(warmCBasis, R[j])
+                  MOI.set(grb, Gurobi.ConstraintAttribute("CBasis"), index(con), warmCBasis[R[j]])
+              else
+                  # New constraint: slack is basic (not tight)
+                  MOI.set(grb, Gurobi.ConstraintAttribute("CBasis"), index(con), 0)
+              end
+          end
+          set_attribute(newModel, "LPWarmStart", 2)
+          set_attribute(newModel, "Method", 1)
+      end
       @timeit to "optimize!" optimize!(newModel)
       endTime = time_ns()
       push!(timeToOptimize, (endTime - startTime)/1e9)
@@ -395,7 +440,7 @@ module clarkson
         #optimalPrimal = Dict(zip(all_variables(newModel), value(all_variables(newModel))))
         optimalPrimal = value(all_variables(newModel))
         #y = shadow_price.(all_constraints(newModel, include_variable_in_set_constraints=modelConstraints.include_variable))
-        y = shadow_price.(sampledConstraintRefs)
+        #y = shadow_price.(sampledConstraintRefs)
         dual_reduced_cost = modelConstraints.b - modelConstraints.data.A * optimalPrimal
         #dual_reduced_cost = constraints.data.b_upper - constraints.data.A * x
         grb_backend = backend(newModel)
@@ -430,6 +475,7 @@ module clarkson
       println("There are: ", length(V), " constraints violated.")
       println("The weight of violated constraints are: ", violated_weight)
       println("The current threshold is: ", (2*n*modelConstraints.totalWeight)/r)
+      println(bucket_info(modelConstraints.PB, V, R))
       #println("shadow price:", y)
       push!(numOfViolatedIterates, length(V))
       if isempty(V)
@@ -449,8 +495,10 @@ module clarkson
         # (1+1/(3n))^{n ln(m)} m ~ m^2
       elseif violated_weight < (2*n*modelConstraints.totalWeight)/r
         startTime = time_ns()
+        c_basis = nothing
         if c_basis == nothing
           @timeit to "update weight on violated constraint" begin
+          levels = sort([ (get_level(modelConstraints.PB, i), i) for i in V ], rev=true)
           for v in V
             updateWeight(modelConstraints, v, alpha)
           end
@@ -536,8 +584,17 @@ module clarkson
       #if status == MOI.OPTIMAL
       #  r = 6*n^2
       #end
-      if length(V) <= 100
+      if length(V) <= r
         r = 6*n^2
+      end
+      if status == MOI.OPTIMAL && length(V) <= n
+        # Extract basis for warm starting future iterations
+        grb = backend(newModel)
+        warmVBasis = [MOI.get(grb, Gurobi.VariableAttribute("VBasis"), index(v)) for v in all_variables(newModel)]
+        all_cons_extract = all_constraints(newModel; include_variable_in_set_constraints = false)
+        warmCBasis = Dict(R[j] => MOI.get(grb, Gurobi.ConstraintAttribute("CBasis"), index(all_cons_extract[j])) for j in 1:length(all_cons_extract))
+        # Only remember the tight (non-basic) constraints — the ~n constraints that define the optimal vertex
+        warmConstr = [R[j] for j in 1:length(all_cons_extract) if MOI.get(grb, Gurobi.ConstraintAttribute("CBasis"), index(all_cons_extract[j])) != 0]
       end
     end # While end
 
