@@ -237,23 +237,66 @@ module clarkson
     n = length(point)
 
     startTime = time_ns()
-    LHSData = constraints.data.A * point
-    endTime = time_ns()
-    println("time to calculate Ax: ", (endTime - startTime)/1e9)
+    # Fast pass: compute Ax with Float64
+    A = constraints.data.A
+    LHSData = A * point
 
-    # Use relative tolerance: tol = EPS * (1 + |b| + ||a||)
+    # Identify constraints needing precise check (within 1e-4 of boundary)
+    COARSE_TOL = 1e-4
+    needs_precise = Int[]
+    for i in 1:m
+      ax_val = LHSData[i]
+      b_lower = constraints.data.b_lower[i]
+      b_upper = constraints.data.b_upper[i]
+      # Check if close to lower bound
+      if abs(ax_val - b_lower) < COARSE_TOL
+        push!(needs_precise, i)
+      # Check if close to upper bound
+      elseif isfinite(b_upper) && abs(ax_val - b_upper) < COARSE_TOL
+        push!(needs_precise, i)
+      end
+    end
+
+    # Precise pass: recompute only ambiguous rows with BigFloat + Kahan
+    if !isempty(needs_precise)
+      point_big = BigFloat.(point)
+      for i in needs_precise
+        sum_val = BigFloat(0.0)
+        comp = BigFloat(0.0)
+        for j in 1:n
+          if A[i, j] != 0
+            y = BigFloat(A[i, j]) * point_big[j] - comp
+            t = sum_val + y
+            comp = (t - sum_val) - y
+            sum_val = t
+          end
+        end
+        LHSData[i] = Float64(sum_val)
+      end
+    end
+    endTime = time_ns()
+    println("time to calculate Ax (fast + ", length(needs_precise), " precise): ", (endTime - startTime)/1e9)
+
+    # Use relative tolerance: tol = EPS * max(|Ax|, |b|, 1)
     startTime = time_ns()
     for i in 1:m
-      row_scale = 1.0 + abs(constraints.data.b_lower[i]) + constraints.rowNorm[i]
-      tol = EPS * row_scale
-      if LHSData[i] < constraints.data.b_lower[i] - tol
+      ax_val = LHSData[i]
+      b_val = constraints.data.b_lower[i]
+      scale = max(abs(ax_val), abs(b_val), 1.0)
+      tol = EPS * scale
+      if ax_val < b_val - tol
         push!(violated, i)
         violated_weight += constraints.weights[i]
         is_feasible = false
-      elseif isfinite(constraints.data.b_upper[i]) && LHSData[i] > constraints.data.b_upper[i] + tol
-        push!(violated, i)
-        violated_weight += constraints.weights[i]
-        is_feasible = false
+      elseif isfinite(constraints.data.b_upper[i])
+        b_upper = constraints.data.b_upper[i]
+        scale_upper = max(abs(ax_val), abs(b_upper), 1.0)
+        tol_upper = EPS * scale_upper
+        if ax_val > b_upper + tol_upper
+          push!(violated, i)
+          violated_weight += constraints.weights[i]
+          is_feasible = false
+        end
       end
     end
 
@@ -261,12 +304,22 @@ module clarkson
     for i in 1:n
       lb = constraints.data.x_lower[i]
       ub = constraints.data.x_upper[i]
-      tol_lb = EPS * (1.0 + abs(lb))
-      tol_ub = EPS * (1.0 + abs(ub))
-      if point[i] < lb - tol_lb || point[i] > ub + tol_ub
-        push!(violated, i + m)
-        violated_weight += constraints.weights[i+m]
-        is_feasible = false
+      if isfinite(lb)
+        scale_lb = max(abs(point[i]), abs(lb), 1.0)
+        if point[i] < lb - EPS * scale_lb
+          push!(violated, i + m)
+          violated_weight += constraints.weights[i+m]
+          is_feasible = false
+          continue
+        end
+      end
+      if isfinite(ub)
+        scale_ub = max(abs(point[i]), abs(ub), 1.0)
+        if point[i] > ub + EPS * scale_ub
+          push!(violated, i + m)
+          violated_weight += constraints.weights[i+m]
+          is_feasible = false
+        end
       end
     end
     endTime = time_ns()
