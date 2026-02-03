@@ -496,9 +496,9 @@ module clarkson
       println(status)
       push!(optimalityIterates, status)
       if status == MOI.OPTIMAL
-        # Extract the optimal solution.
-        #optimalPrimal = Dict(zip(all_variables(newModel), value(all_variables(newModel))))
-        optimalPrimal = value(all_variables(newModel))
+        # Extract the optimal solution in the same variable order as data.A columns
+        # data.variables contains the variable ordering used in the matrix
+        optimalPrimal = [value(newModelMap[v]) for v in modelConstraints.data.variables]
         #y = shadow_price.(all_constraints(newModel, include_variable_in_set_constraints=modelConstraints.include_variable))
         #y = shadow_price.(sampledConstraintRefs)
         dual_reduced_cost = modelConstraints.b - modelConstraints.data.A * optimalPrimal
@@ -536,6 +536,20 @@ module clarkson
       println("The weight of violated constraints are: ", violated_weight)
       println("The current threshold is: ", (2*n*modelConstraints.totalWeight)/r)
       println(bucket_info(modelConstraints.PB, V, R))
+
+      # DEBUG: Check for constraints that are both sampled AND violated
+      sampled_and_violated = intersect(Set(R), Set(V))
+      if !isempty(sampled_and_violated)
+        println("=== BUG DEBUG: $(length(sampled_and_violated)) constraints are BOTH sampled AND violated! ===")
+        for idx in first(collect(sampled_and_violated), 3)  # Show first 3
+          c = modelConstraints.constraints[idx]
+          ax_val = dot(modelConstraints.data.A[idx, :], optimalPrimal)
+          b_val = modelConstraints.data.b_lower[idx]
+          println("  Constraint $idx: $(c.func) >= $(c.set.lower)")
+          println("    Ax = $ax_val, b = $b_val, violation = $(b_val - ax_val)")
+        end
+        println("=== END BUG DEBUG ===")
+      end
       #println("shadow price:", y)
       push!(numOfViolatedIterates, length(V))
       if isempty(V)
@@ -564,86 +578,11 @@ module clarkson
           end
           end #@timeit to "update weight on violated constraint" begin
         end
-        if c_basis != nothing
-          @timeit to "steepest edge rule" begin
-          #dual_model, primal_dual_map = dualize(newModel)
-          #setOptimizer(dual_model)
-          #for (primal_con, dual_var) in primal_dual_map.primal_con_dual_var
-          #  set_start_value(dual_var, dual(primal_con))
-          #end
-          #for (primal_var, dual_con) in primal_dual_map.primal_var_dual_con
-          #  set_dual_start_value(dual_con, value(primal_var))
-          #end
-          #optimize!(dual_model)
-          candidate_indices = (objSense == MIN_SENSE) ? findall(dual_reduced_cost .> EPS) : findall(dual_reduced_cost .< EPS)
-          if sort(V) != sort(candidate_indices)
-            println("------NOT EQUAL!!!!----")
-            exit(1)
-          end
-          #candidate_indices = (objSense == MAX_SENSE) ? findall(dual_reduced_cost .> EPS) : findall(dual_reduced_cost .< EPS)
-          #statuses = get_attribute.(all_variables(newModel), MOI.VariableBasisStatus())
-          #statuses = get_attribute.(sampledConstraintRefs, MOI.ConstraintBasisStatus())
-          #basic_indices = findall(s -> s == MOI.BASIC, statuses)
-
-
-          #basic_indices = findall(abs.(y) .> EPS)
-          basic_indices = R[c_basis]
-          ## Calculate d = A_B^(-T) A^T
-          A_B = modelConstraints.data.A[basic_indices, :]
-          #if (size(A_B, 1) < size(A_B, 2))
-          #  A_B = vcat(A_B, zeros(size(A_B, 2) - size(A_B, 1), size(A_B, 2)))
-          #end
-          #println(size(A_B))
-          #println(size(modelConstraints.data.A[candidate_indices, :]))
-          #d = myLsqr(transpose(A_B), transpose(modelConstraints.data.A[candidate_indices, :]))
-          
-          #QR = qr(transpose(A_B))
-          #Q = QR.Q
-          #R = QR.R
-          #d = inv(R) * transpose(Q) * transpose(modelConstraints.data.A[candidate_indices, :])
-          LU = lu(sparse(transpose(A_B)))
-          #d = LU \ Matrix(transpose(modelConstraints.data.A[candidate_indices, :]))
-          d = LU \ Matrix(transpose(modelConstraints.data.A[candidate_indices, :]))
-
-          
-          #d = Matrix(transpose(A_B))\Matrix(transpose(modelConstraints.data.A[candidate_indices, :]))
-          #rowNorm = vec(sqrt.(sum(abs2, modelConstraints.data.A[candidate_indices, :] * transpose(inv(A_B)), dims=2)))
-          #@time println(A_B' \ modelConstraints.data.A[candidate_indices, :]')
-          #@time println(modelConstraints.data.A[candidate_indices, :] * transpose(inv(Matrix(A_B))))
-          #
-          # b^T - b_B^T (A_B)^-T A^T
-          colNorm = vec(sqrt.(sum(abs2, d, dims=1)))
-          top = sort([Pair(abs(dual_reduced_cost[i]/colNorm[j]), i) for (j,i) in enumerate(candidate_indices)], rev=true)
-          #top = sort([Pair(abs(dual_reduced_cost[i]/colNorm[j]), i) for (j,i) in enumerate(candidate_indices)], rev=false)
-          top = first(top, max(trunc(Int64, length(top) * topPercent), 10))
-          #top_five = first(sort([Pair(abs(dual_reduced_cost[i]), i) for i in candidate_indices], rev=true), 40)
-          for (_, i::Int) in top
-            updateWeight(modelConstraints, i, beta)
-          end
-          end # @timeit to "steepest edge rule"
-        end
-        #if y != nothing
-        #  non_zero_indices = (objSense == MIN_SENSE) ? findall(y .< -EPS) : findall(y .> EPS)
-        #  # = sort([Pair(abs(y[i]/modelConstraints.rowNorm[R[i]]), i) for i in non_zero_indices], rev=true)
-        #  denom = sum([ abs(y[i]) for i in non_zero_indices ])
-        #  #top_five = first(sort([Pair(abs(y[i]/modelConstraints.rowNorm[R[i]]), i) for i in non_zero_indices], rev=true), 5)
-        #  #for (_, i::Int) in top_five
-        #  for i::Int in non_zero_indices
-        #    updateWeight(modelConstraints, R[i], 1.0 + 5.0 * abs(y[i]/denom))
-        #    #if (isAffConstraint(modelConstraints, R[i])) 
-        #    #  println(y[i]/modelConstraints.rowNorm[R[i]])
-        #    #  updateWeight(modelConstraints, R[i], 1+abs(y[i]/modelConstraints.rowNorm[R[i]]))
-        #    #end
-        #  end
-        #end
         endTime = time_ns()
         push!(timeToUpdateWeights, (endTime - startTime)/1e9)
       else
         println("Not updated becuase too many constraints are violated.")
       end
-      #if status == MOI.OPTIMAL
-      #  r = 6*n^2
-      #end
       if length(V) <= r
         r = 6*n^2
       end
