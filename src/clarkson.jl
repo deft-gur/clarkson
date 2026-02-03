@@ -241,21 +241,29 @@ module clarkson
     endTime = time_ns()
     println("time to calculate Ax: ", (endTime - startTime)/1e9)
 
-    # =, >=, <=
-    violationConstrVector = LHSData .>= (constraints.data.b_lower - EPS * ones(m))
-    violationConstrVector = violationConstrVector .& (LHSData .<= (constraints.data.b_upper + EPS * ones(m)))
-    violatedVarVector = point .>= constraints.data.x_lower - EPS*ones(n)
-    violatedVarVector = violatedVarVector .& (point .<= constraints.data.x_upper + EPS*ones(n))
+    # Use relative tolerance: tol = EPS * (1 + |b| + ||a||)
     startTime = time_ns()
     for i in 1:m
-      if (violationConstrVector[i] == false)
-       push!(violated, i)
-       violated_weight += constraints.weights[i]
-       is_feasible = false
+      row_scale = 1.0 + abs(constraints.data.b_lower[i]) + constraints.rowNorm[i]
+      tol = EPS * row_scale
+      if LHSData[i] < constraints.data.b_lower[i] - tol
+        push!(violated, i)
+        violated_weight += constraints.weights[i]
+        is_feasible = false
+      elseif isfinite(constraints.data.b_upper[i]) && LHSData[i] > constraints.data.b_upper[i] + tol
+        push!(violated, i)
+        violated_weight += constraints.weights[i]
+        is_feasible = false
       end
     end
+
+    # Check variable bounds with relative tolerance
     for i in 1:n
-      if (violatedVarVector[i] == false)
+      lb = constraints.data.x_lower[i]
+      ub = constraints.data.x_upper[i]
+      tol_lb = EPS * (1.0 + abs(lb))
+      tol_ub = EPS * (1.0 + abs(ub))
+      if point[i] < lb - tol_lb || point[i] > ub + tol_ub
         push!(violated, i + m)
         violated_weight += constraints.weights[i+m]
         is_feasible = false
