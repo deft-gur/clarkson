@@ -191,7 +191,7 @@ module clarkson
     set_optimizer(model, () -> Gurobi.Optimizer(Gurobi.Env()))
     #set_attribute(model, "Threads", Threads.nthreads())
     set_attribute(model, "InfUnbdInfo", 1)
-    set_attribute(model, "FeasibilityTol", EPS)  # Match our violation check tolerance
+    set_attribute(model, "FeasibilityTol", EPS)
     #set_attribute(model, "Presolve", 0)
     #set_attribute(model, "DualReductions", 0)
     #set_attribute(model, "Method", 0)
@@ -222,7 +222,6 @@ module clarkson
   end
 
   function violatedConstraints(constraints::ModelConstraints, point::Vector{Float64})
-
     totalW = 0
     for i in 1:length(constraints.weights)
       totalW += constraints.weights[i]
@@ -237,89 +236,28 @@ module clarkson
     n = length(point)
 
     startTime = time_ns()
-    # Fast pass: compute Ax with Float64
-    A = constraints.data.A
-    LHSData = A * point
-
-    # Identify constraints needing precise check (within 1e-4 of boundary)
-    COARSE_TOL = 1e-4
-    needs_precise = Int[]
-    for i in 1:m
-      ax_val = LHSData[i]
-      b_lower = constraints.data.b_lower[i]
-      b_upper = constraints.data.b_upper[i]
-      # Check if close to lower bound
-      if abs(ax_val - b_lower) < COARSE_TOL
-        push!(needs_precise, i)
-      # Check if close to upper bound
-      elseif isfinite(b_upper) && abs(ax_val - b_upper) < COARSE_TOL
-        push!(needs_precise, i)
-      end
-    end
-
-    # Precise pass: recompute only ambiguous rows with BigFloat + Kahan
-    if !isempty(needs_precise)
-      point_big = BigFloat.(point)
-      for i in needs_precise
-        sum_val = BigFloat(0.0)
-        comp = BigFloat(0.0)
-        for j in 1:n
-          if A[i, j] != 0
-            y = BigFloat(A[i, j]) * point_big[j] - comp
-            t = sum_val + y
-            comp = (t - sum_val) - y
-            sum_val = t
-          end
-        end
-        LHSData[i] = Float64(sum_val)
-      end
-    end
+    LHSData = constraints.data.A * point
     endTime = time_ns()
-    println("time to calculate Ax (fast + ", length(needs_precise), " precise): ", (endTime - startTime)/1e9)
+    println("time to calculate Ax: ", (endTime - startTime)/1e9)
 
-    # Use relative tolerance: tol = EPS * max(|Ax|, |b|, 1)
+    # =, >=, <=
+    violationConstrVector = LHSData .>= (constraints.data.b_lower - EPS * ones(m))
+    violationConstrVector = violationConstrVector .& (LHSData .<= (constraints.data.b_upper + EPS * ones(m)))
+    violatedVarVector = point .>= constraints.data.x_lower - EPS*ones(n)
+    violatedVarVector = violatedVarVector .& (point .<= constraints.data.x_upper + EPS*ones(n))
     startTime = time_ns()
     for i in 1:m
-      ax_val = LHSData[i]
-      b_val = constraints.data.b_lower[i]
-      scale = max(abs(ax_val), abs(b_val), 1.0)
-      tol = EPS * scale
-      if ax_val < b_val - tol
-        push!(violated, i)
-        violated_weight += constraints.weights[i]
-        is_feasible = false
-      elseif isfinite(constraints.data.b_upper[i])
-        b_upper = constraints.data.b_upper[i]
-        scale_upper = max(abs(ax_val), abs(b_upper), 1.0)
-        tol_upper = EPS * scale_upper
-        if ax_val > b_upper + tol_upper
-          push!(violated, i)
-          violated_weight += constraints.weights[i]
-          is_feasible = false
-        end
+      if (violationConstrVector[i] == false)
+       push!(violated, i)
+       violated_weight += constraints.weights[i]
+       is_feasible = false
       end
     end
-
-    # Check variable bounds with relative tolerance
     for i in 1:n
-      lb = constraints.data.x_lower[i]
-      ub = constraints.data.x_upper[i]
-      if isfinite(lb)
-        scale_lb = max(abs(point[i]), abs(lb), 1.0)
-        if point[i] < lb - EPS * scale_lb
-          push!(violated, i + m)
-          violated_weight += constraints.weights[i+m]
-          is_feasible = false
-          continue
-        end
-      end
-      if isfinite(ub)
-        scale_ub = max(abs(point[i]), abs(ub), 1.0)
-        if point[i] > ub + EPS * scale_ub
-          push!(violated, i + m)
-          violated_weight += constraints.weights[i+m]
-          is_feasible = false
-        end
+      if (violatedVarVector[i] == false)
+        push!(violated, i + m)
+        violated_weight += constraints.weights[i+m]
+        is_feasible = false
       end
     end
     endTime = time_ns()
@@ -430,16 +368,17 @@ module clarkson
     modelConstraints = @time ModelConstraints(model, include_variable)
     n = length(all_variables(model))
     r = 6*n^2
-    r = 2*n*trunc(Int64, log2(n)+1)
+    #r = 2*n*trunc(Int64, log2(n)+1)
     objSense = objective_sense(model)
     warmVBasis::Union{Nothing, Vector{Int}} = nothing
     warmCBasis::Union{Nothing, Dict{Int, Int}} = nothing
     warmConstr::Union{Nothing, Vector{Int}} = nothing
-    warmStart = false
+    warmStart = true
 
     numOfViolatedIterates = []
     optimalityIterates = []
     timeToOptimize = []
+    timeToOptimizeWarmStart = []
     timeToCheckConstraints = []
     timeToSample = []
     timeToAddConstraints = []
@@ -466,16 +405,17 @@ module clarkson
       #set_optimizer(newModel, () -> Gurobi.Optimizer(Gurobi.Env()))
       #set_attribute(newModel, "InfUnbdInfo", 1)
       # Solve base case.
-      startTime = time_ns()
+      warmModel, warmModelMap = copy_model(newModel)
+      setOptimizer(warmModel)
       if warmVBasis !== nothing
           println("Setting warm start basis.")
-          grb = backend(newModel)
+          grb = backend(warmModel)
           # Set VBasis on all variables (using data.variables ordering to match warmVBasis)
           for (j, var) in enumerate(modelConstraints.data.variables)
-              MOI.set(grb, Gurobi.VariableAttribute("VBasis"), index(newModelMap[var]), warmVBasis[j])
+              MOI.set(grb, Gurobi.VariableAttribute("VBasis"), index(warmModelMap[var]), warmVBasis[j])
           end
           # Set CBasis on all constraints
-          all_cons_ws = all_constraints(newModel; include_variable_in_set_constraints = false)
+          all_cons_ws = all_constraints(warmModel; include_variable_in_set_constraints = false)
           for (j, con) in enumerate(all_cons_ws)
               if haskey(warmCBasis, R[j])
                   MOI.set(grb, Gurobi.ConstraintAttribute("CBasis"), index(con), warmCBasis[R[j]])
@@ -484,12 +424,17 @@ module clarkson
                   MOI.set(grb, Gurobi.ConstraintAttribute("CBasis"), index(con), 0)
               end
           end
-          set_attribute(newModel, "LPWarmStart", 2)
-          set_attribute(newModel, "Method", 1)
+          set_attribute(warmModel, "LPWarmStart", 2)
+          set_attribute(warmModel, "Method", 1)
       end
+      startTime = time_ns()
       @timeit to "optimize!" optimize!(newModel)
       endTime = time_ns()
       push!(timeToOptimize, (endTime - startTime)/1e9)
+      startTime = time_ns()
+      @timeit to "optimize! warm:" optimize!(warmModel)
+      endTime = time_ns()
+      push!(timeToOptimizeWarmStart, (endTime - startTime)/1e9)
       status = termination_status(newModel)
       optimalPrimal = nothing
       y = nothing
@@ -558,6 +503,7 @@ module clarkson
         println("Violations: ", numOfViolatedIterates)
         println("Optimality: ", optimalityIterates)
         println("Time to optimize: ", timeToOptimize)
+        println("Time to optimize warm: ", timeToOptimizeWarmStart)
         println("Time to check violation: ", timeToCheckConstraints)
         println("Time to sample: ", timeToSample)
         println("Time to add constraints: ", timeToAddConstraints)
