@@ -470,9 +470,9 @@ module clarkson
       if warmVBasis !== nothing
           println("Setting warm start basis.")
           grb = backend(newModel)
-          # Set VBasis on all variables
-          for (j, var) in enumerate(all_variables(newModel))
-              MOI.set(grb, Gurobi.VariableAttribute("VBasis"), index(var), warmVBasis[j])
+          # Set VBasis on all variables (using data.variables ordering to match warmVBasis)
+          for (j, var) in enumerate(modelConstraints.data.variables)
+              MOI.set(grb, Gurobi.VariableAttribute("VBasis"), index(newModelMap[var]), warmVBasis[j])
           end
           # Set CBasis on all constraints
           all_cons_ws = all_constraints(newModel; include_variable_in_set_constraints = false)
@@ -598,9 +598,9 @@ module clarkson
         warmStart = true
       end
       if status == MOI.OPTIMAL && warmStart
-        # Extract basis for warm starting future iterations
+        # Extract basis for warm starting future iterations (using data.variables ordering)
         grb = backend(newModel)
-        warmVBasis = [MOI.get(grb, Gurobi.VariableAttribute("VBasis"), index(v)) for v in all_variables(newModel)]
+        warmVBasis = [MOI.get(grb, Gurobi.VariableAttribute("VBasis"), index(newModelMap[v])) for v in modelConstraints.data.variables]
         all_cons_extract = all_constraints(newModel; include_variable_in_set_constraints = false)
         warmCBasis = Dict(R[j] => MOI.get(grb, Gurobi.ConstraintAttribute("CBasis"), index(all_cons_extract[j])) for j in 1:length(all_cons_extract))
         # Only remember the tight (non-basic) constraints — the ~n constraints that define the optimal vertex
