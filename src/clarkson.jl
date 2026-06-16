@@ -543,7 +543,7 @@ module clarkson
           end
           for v in V
             if isAffConstraint(modelConstraints, v) &&
-               r * modelConstraints.weights[v] >= significance * log(r) * modelConstraints.totalWeight
+               r * modelConstraints.weights[v] >= significance * modelConstraints.totalWeight
               makeAlwaysInclude!(modelConstraints, v)
               println("Pinning constraint ", v, " into every sample (weight zeroed).")
             end
