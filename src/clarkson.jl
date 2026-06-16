@@ -37,6 +37,7 @@ module clarkson
       include_variable::Bool
       rowNorm::Vector{Float64}
       b::Vector{Float64}
+      alwaysInclude::Vector{Int}
   end
 
   function isVariableConstraint(m::ModelConstraints, i::Int64)
@@ -130,7 +131,8 @@ module clarkson
         Operators,
         include_variable,
         rowNorm,
-        b
+        b,
+        Int[]
         )
   end
 
@@ -155,9 +157,16 @@ module clarkson
       return 0
     end
     Constraints.totalWeight += (mul - 1) * Constraints.weights[i]
-    Constraints.weights[i] *= mul 
+    Constraints.weights[i] *= mul
     update!(Constraints.PB, i, Constraints.weights[i])
     return 1
+  end
+
+  function makeAlwaysInclude!(Constraints::ModelConstraints, i::Int)
+    Constraints.totalWeight -= Constraints.weights[i]
+    Constraints.weights[i] = 0.0
+    remove!(Constraints.PB, i)
+    push!(Constraints.alwaysInclude, i)
   end
 
   # addConstraints(constraints, R)
@@ -269,7 +278,7 @@ module clarkson
   function sample(model::ModelConstraints, r::Int64, include_index::Vector{Int64} = Vector{Int64}(undef, 0))
     ret = sort(unique(rand(model.rng, model.weights, r)))
     println("Percent of unique sampled constraints: ", length(ret)/r)
-    ret = unique(vcat(ret, include_index))
+    ret = sort(unique(vcat(ret, include_index)))
     return ret
   end
 
@@ -364,7 +373,7 @@ module clarkson
   # Output: Return an optimal value and primal solution to the LP.
   #
   function Clarkson(model::Model, alpha::Number=2, include_variable::Bool=false,
-                    topPercent::Float64=0.1, beta::Number=2)
+                    topPercent::Float64=0.1, beta::Number=2, significance::Number=1)
     # Initial setup stage:
     bounded_box_constraint_index = transform_model!(model)
     #bounded_box_constraint_index = []
@@ -391,14 +400,14 @@ module clarkson
     timeToUpdateWeights = []
     objValues = []
     numIt = 0
+    eps = 1/(log(n))
     while true
       numIt += 1
-      eps = 1/(20*numIt)
       r = getEpsSize(n, eps, delta)
       # Sampling procedure:
       startTime = time_ns()
       #R = @timeit to "sample()" sample(modelConstraints, r, bounded_box_constraint_index)
-      R = @timeit to "sample()" sample(modelConstraints, r)
+      R = @timeit to "sample()" sample(modelConstraints, r, modelConstraints.alwaysInclude)
       if warmVBasis !== nothing
           R = sort(unique(vcat(R, warmConstr)))
       end
@@ -532,12 +541,22 @@ module clarkson
           for v in V
             updateWeight(modelConstraints, v, alpha)
           end
+          for v in V
+            if isAffConstraint(modelConstraints, v) &&
+               r * modelConstraints.weights[v] >= significance * log(r) * modelConstraints.totalWeight
+              makeAlwaysInclude!(modelConstraints, v)
+              println("Pinning constraint ", v, " into every sample (weight zeroed).")
+            end
+          end
           end #@timeit to "update weight on violated constraint" begin
         end
         endTime = time_ns()
         push!(timeToUpdateWeights, (endTime - startTime)/1e9)
       else
         println("Not updated becuase too many constraints are violated.")
+      end
+      if (length(V) <= n)
+        eps = 1/n
       end
     end # While end
 

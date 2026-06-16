@@ -73,6 +73,18 @@ function update!(pb::PowerBucket, index::Int, new_weight::Float64)
   end
 end
 
+function remove!(pb::PowerBucket, index::Int)
+  @assert 1 <= index <= length(pb.weights) "Invalid index"
+  old_level = pb.index_to_level[index]
+  if old_level >= 1
+    delete!(pb.large_buckets[old_level], index)
+  elseif old_level != typemin(Int)
+    delete!(pb.small_buckets[1 - old_level], index)
+  end
+  pb.weights[index] = 0.0
+  pb.index_to_level[index] = typemin(Int)
+end
+
 function get_elements_in_level(pb::PowerBucket, level::Int)::Vector{Int}
   if level >= 1
     if level > length(pb.large_buckets)
