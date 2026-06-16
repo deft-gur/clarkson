@@ -400,6 +400,7 @@ module clarkson
     timeToUpdateWeights = []
     objValues = []
     numIt = 0
+    numSucc = 0
     eps = 1/(log(n))
     while true
       numIt += 1
@@ -535,6 +536,7 @@ module clarkson
       elseif violated_weight < (2*n*modelConstraints.totalWeight)/r
         startTime = time_ns()
         c_basis = nothing
+        numSucc += 1
         if c_basis == nothing
           @timeit to "update weight on violated constraint" begin
           levels = sort([ (get_level(modelConstraints.PB, i), i) for i in V ], rev=true)
@@ -543,11 +545,13 @@ module clarkson
           end
           for v in V
             if isAffConstraint(modelConstraints, v) &&
-               r * modelConstraints.weights[v] >= significance * log(r) * modelConstraints.totalWeight
+              numSucc >= 2*log2(n) &&
+              modelConstraints.weights[v] >= 2^(numSucc/6)
               makeAlwaysInclude!(modelConstraints, v)
               println("Pinning constraint ", v, " into every sample (weight zeroed).")
             end
           end
+          println("Number of always included constraint is:", length(modelConstraints.alwaysInclude))
           end #@timeit to "update weight on violated constraint" begin
         end
         endTime = time_ns()
