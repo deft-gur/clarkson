@@ -548,6 +548,7 @@ module clarkson
               println("Pinning constraint ", v, " into every sample (weight zeroed).")
             end
           end
+          println("Number of always included constraint is:", length(modelConstraints.alwaysInclude))
           end #@timeit to "update weight on violated constraint" begin
         end
         endTime = time_ns()
