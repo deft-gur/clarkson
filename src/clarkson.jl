@@ -357,6 +357,22 @@ module clarkson
     return Int64(ceil(min(8 * n*log(n/epsilon)/epsilon, log(1/delta)/epsilon)))
   end
 
+  function spikinessInvEps(constraints::ModelConstraints, n::Int64, constLow::Float64)
+    m = constraints.numConstraints
+    lo = min(constLow, Float64(n))
+    (m <= 1) && return Float64(n)
+    total = constraints.totalWeight
+    sumP2 = 0.0
+    for i in 1:m
+      p = constraints.weights[i] / total
+      sumP2 += p * p
+    end
+    effN = 1.0 / sumP2
+    s = clamp((effN - 1.0) / (m - 1.0), 0.0, 1.0)
+    spikeness = 1.0 - s
+    return lo + (Float64(n) - lo) * spikeness
+  end
+
   # Clarkson(model)
   #
   # Input: model containing the LP.
@@ -393,7 +409,8 @@ module clarkson
     numIt = 0
     while true
       numIt += 1
-      eps = 1/(20*numIt)
+      invEps = spikinessInvEps(modelConstraints, n, 20.0)
+      eps = 1/invEps
       r = getEpsSize(n, eps, delta)
       # Sampling procedure:
       startTime = time_ns()
