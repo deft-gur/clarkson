@@ -354,7 +354,7 @@ module clarkson
   end
 
   function getEpsSize(n::Int64, epsilon::Float64, delta::Float64)
-    return Int64(ceil(min(8 * n*log(n/epsilon)/epsilon, log(1/delta)/epsilon)))
+    return Int64(ceil(max(8 * n*log(n/epsilon)/epsilon, log(1/delta)/epsilon)))
   end
 
   function spikinessInvEps(constraints::ModelConstraints, n::Int64, constLow::Float64)
